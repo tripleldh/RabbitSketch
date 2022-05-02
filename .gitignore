@@ -1,0 +1,3 @@
+build
+examples/main
+examples/*.o

@@ -7,16 +7,24 @@
 //#include <string.h>
 #include <stdint.h>
 #include <float.h>
+#include <unordered_set>
 
 #include "MinHash.h"
 #include "histoSketch.h"
 #include "HyperLogLog.h"
+//#include "kssd.h"
 
 #if defined(_MSC_VER)
 #include <BaseTsd.h>
 typedef SSIZE_T ssize_t;
 #endif  
 
+#define COMPONENT_SZ 7
+#define MIN_SUBCTX_DIM_SMP_SZ 4096
+#define _64MASK 0xffffffffffffffffLLU
+#define CTX_SPC_USE_L 8
+#define LD_FCTR 0.6
+#define DEFAULT_CHAR_KSSD -1
 
 /// \brief Sketch namespace
 namespace Sketch{
@@ -156,6 +164,106 @@ namespace Sketch{
 			//FIXME: perserveCase is not included in constructor
 			bool preserveCase = false;
 	};
+
+	struct KSSDParameters
+	{
+		int half_k;
+		int half_subk;
+		int drlevel;
+		int* shuffled_dim;
+	
+		int* shuffleN(int n, int base);
+		int* shuffle(int arr[], int length);
+		int get_hashSize(int half_k, int drlevel);
+		int hashSize;
+	
+		KSSDParameters(int half_k_=10, int half_subk_=6, int drlevel_=3):
+			half_k(half_k_), half_subk(half_subk_), drlevel(drlevel_)
+		{
+			int dim_size = 1 << 4 * half_subk;
+			shuffled_dim = (int*)malloc(sizeof(int) * dim_size);
+			shuffled_dim = shuffleN(dim_size, 0);
+			shuffled_dim = shuffle(shuffled_dim, dim_size);
+			hashSize = get_hashSize(half_k, drlevel);
+		}
+	
+	};
+
+	class KSSD
+	{
+		public:
+			KSSD(KSSDParameters parameter)
+			{
+				for(int i = 0; i< 128; i++)
+				{
+					BaseMap[i] = DEFAULT_CHAR_KSSD;
+				}
+				BaseMap['a'] = 0;
+				BaseMap['c'] = 1;
+				BaseMap['g'] = 2;
+				BaseMap['t'] = 3;
+				BaseMap['A'] = 0;
+				BaseMap['C'] = 1;
+				BaseMap['G'] = 2;
+				BaseMap['T'] = 3;
+				shuffled_dim = parameter.shuffled_dim;
+				half_k = parameter.half_k;
+				half_subk = parameter.half_subk;
+				drlevel = parameter.drlevel;
+				hashSize = parameter.hashSize;
+	
+	
+				half_outctx_len = half_k - half_subk;
+				rev_addmove = 4 * half_k - 2;
+				kmer_size = 2 * half_k;
+				dim_start = 0;
+				dim_end = MIN_SUBCTX_DIM_SMP_SZ;
+				hashLimit = hashSize * LD_FCTR;
+				component_num = half_k - drlevel > COMPONENT_SZ ? 1LU << 4 * (half_k - drlevel - COMPONENT_SZ) : 1;
+				comp_bittl = 64 - 4 * half_k;
+				tupmask = _64MASK >> comp_bittl;
+				domask = (tupmask >> (4 * half_outctx_len)) << (2 * half_outctx_len);
+				undomask = (tupmask ^ domask) & tupmask;
+				undomask1 = undomask &	(tupmask >> ((half_k + half_subk) * 2));
+				undomask0 = undomask ^ undomask1;
+	
+			}
+	
+			void update(char* seq);
+			double jaccard(KSSD* kssd);
+			double distance(KSSD* kssd);
+			void printHashes();
+	
+		private:
+			int half_k;
+			int half_subk;
+			int drlevel;
+			int half_outctx_len;
+			int rev_addmove;
+			int kmer_size;
+			int dim_start;
+			int dim_end;
+			int hashSize;
+			int hashLimit;
+			int component_num;
+			int comp_bittl;
+			int BaseMap[128];
+			int* shuffled_dim;
+	
+			uint64_t tupmask;
+			uint64_t domask;
+			uint64_t undomask;
+			uint64_t undomask0;
+			uint64_t undomask1;
+	
+			vector<uint64_t> hashList;
+			unordered_set<uint64_t> hashSet;
+	
+			int get_hashSize(int half_k, int drlevel);
+			void SetToList();
+	
+	};
+
 
 	class WMinHash{
 		public:

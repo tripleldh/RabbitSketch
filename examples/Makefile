@@ -10,7 +10,7 @@ LIBS=../build/lib
 OBJECTS=main.o 
 
 $(TARGET):$(OBJECTS)
-	$(CXX) $(CXXFLAGS)  $^ -o $@ -I$(INCLUDE) -lz -lrabbitsketch -L$(LIBS)
+	$(CXX) $(CXXFLAGS)  $^ -o $@ -I$(INCLUDE) -lz -lrabbitsketch_static -L$(LIBS)
 #	$(CXX) $(CXXFLAGS)  $^ -o $@ -lgsl -lgslcblas -lm
 
 #%.o:%.cpp
