@@ -813,6 +813,27 @@ void MinHash::printMinHashes()
 	return;
 }
 
+vector<uint64_t> MinHash::storeMinHashes()
+{
+	vector<uint64_t> res;
+	for(int i = 0; i < reference.hashesSorted.size(); i++){
+		if(use64)
+			res.push_back(reference.hashesSorted.at(i).hash64);
+		else
+			res.push_back(reference.hashesSorted.at(i).hash32);
+	}
+	return res;
+}
+
+void MinHash::loadMinHashes(vector<uint64_t> hashArr)
+{
+	for(int i = 0; i < hashArr.size(); i++){
+		if(use64)
+			reference.hashesSorted.hashes64.push_back(hashArr[i]);
+		else
+			reference.hashesSorted.hashes32.push_back((uint32_t)hashArr[i]);
+	}
+}
 
 /* addbyxxm
  * (1)	The merge or the heapToList from heap to update list(where hash values store) need to promise the elements in the list are unique(no repeat element in list).

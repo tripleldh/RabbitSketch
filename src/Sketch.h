@@ -90,6 +90,12 @@ namespace Sketch{
 			//print hash values for debug
 			void printMinHashes();
 
+			//get hash values for saving
+			vector<uint64_t> storeMinHashes();
+
+			//load hash valued from files
+			void loadMinHashes(vector<uint64_t> hashArr);
+
 			/// return totalSeqence length, including multiple updates
 			uint64_t getTotalLength(){return totalLength;}
 
