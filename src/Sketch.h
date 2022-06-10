@@ -84,6 +84,7 @@ namespace Sketch{
 			
 			double containJaccard(MinHash * msh);
 
+			double containDistance(MinHash * msh);
 			/// return mutation distance defined in Mash instead of jaccard distance
 			double distance(MinHash * msh);
 

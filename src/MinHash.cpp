@@ -1074,6 +1074,28 @@ double MinHash::jaccard(MinHash * msh)
 	double jaccard = double(common) / denom;
 	return jaccard;
 }
+double MinHash::containDistance(MinHash * msh)
+{
+	double distance;
+	double maxDistance = 1;
+	double maxPValue = 1;
+
+	double jaccard_ = this->containJaccard(msh);
+	if(jaccard_ == 1.0)	return 0;
+	distance = -log(2 * jaccard_ / (1. + jaccard_)) / kmerSize;
+
+	if ( distance > 1 )
+	{
+		distance = 1;
+	}
+
+	if ( maxDistance >= 0 && distance > maxDistance )
+	{
+		return 1.;
+	}
+	return distance;
+
+}
 
 double MinHash::distance(MinHash * msh)
 {
