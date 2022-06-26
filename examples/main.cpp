@@ -6,6 +6,9 @@
 #include <vector>
 #include <math.h>
 #include <random>
+#include <sstream>
+#include <fstream>
+
 
 using namespace std;
 
@@ -33,6 +36,52 @@ KSEQ_INIT(gzFile, gzread)
 
 int main(int argc, char* argv[])
 {
+//	string kssdHashFile = argv[1];
+//	ifstream ifs(kssdHashFile);
+//	string line;
+//	vector<vector<uint64_t>> hashesArr;
+//	vector<uint64_t> curHashes;
+//	while(getline(ifs, line)){
+//		if(line[0] == '>'){
+//			if(curHashes.size() != 0){
+//				hashesArr.push_back(curHashes);
+//				vector<uint64_t>().swap(curHashes);
+//			}
+//		}
+//		else{
+//			stringstream ss;
+//			ss << line;
+//			uint64_t hash;
+//			ss >> hash;
+//			curHashes.push_back(hash);
+//		}
+//	}
+//	if(curHashes.size() != 0){
+//		hashesArr.push_back(curHashes);
+//		vector<uint64_t>().swap(curHashes);
+//	}
+//
+//	int half_k = 10;
+//	int half_subk = 6;
+//	int drlevel = 3;
+//	Sketch::KSSDParameters kssdPara(half_k, half_subk, drlevel);
+//
+//	vector<Sketch::KSSD *> vkssd;
+//	
+//	for(int i = 0; i < hashesArr.size(); i++){
+//		Sketch::KSSD * kssd = new Sketch::KSSD(kssdPara);
+//		kssd->loadHashes(hashesArr[i]);
+//		vkssd.push_back(kssd);
+//	}
+//	int count = vkssd.size();
+//	for(int i = 0; i < count; i++){
+//		for(int j = i+1; j < count; j++){
+//			double distance4 = vkssd[i]->distance(vkssd[j]);
+//			printf("the distance of seq[%d] and seq[%d] is:\t %lf \n", i, j, distance4);
+//		}
+//	}
+	
+
 
 	gzFile fp1;
 	kseq_t *ks1;
@@ -98,10 +147,14 @@ int main(int argc, char* argv[])
 
 	}
 
-
-//	for(int i = 0; i < count; i++){
-//		//Sketch::WMinHash wmh = new Sketch::WMinHash();
+//	for(int i = 0; i < vkssd.size(); i++){
+//		vector<uint64_t> hashArr = vkssd[i]->storeHashes();
+//		cout << "seq " << i << " is: " << endl;
+//		for(auto x : hashArr){
+//			cout << x << endl;
+//		}
 //	}
+
 	cout << "begin to compute the WMH distance: "  << endl;
 	printf("=====================================\t WMinHash \t MinHash \t OMinHash \t HyperLog\t KSSD \n");
 	for(int i = 0; i < count; i++){

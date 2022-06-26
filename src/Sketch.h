@@ -240,6 +240,8 @@ namespace Sketch{
 			double jaccard(KSSD* kssd);
 			double distance(KSSD* kssd);
 			void printHashes();
+			vector<uint64_t> storeHashes();
+			void loadHashes(vector<uint64_t> hashArr);
 	
 		private:
 			int half_k;

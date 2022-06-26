@@ -82,6 +82,14 @@ namespace Sketch
 		return hashSize;
 	}
 
+	vector<uint64_t> KSSD::storeHashes(){
+		return hashList;
+	}
+
+	void KSSD::loadHashes(vector<uint64_t> hashArr){
+		hashList = hashArr;
+	}
+
 	void KSSD::SetToList()
 	{
 		if(hashList.empty())//first update the hashList
