@@ -168,6 +168,7 @@ namespace Sketch
 		double jaccard = 1.0;
 		int size1 = hashList.size();
 		int size2 = kssd->hashList.size();
+		if(size1 == 0 || size2 == 0) return 0.0;
 		int i = 0, j = 0;
 		int common = 0;
 		while(i < size1 && j < size2)
