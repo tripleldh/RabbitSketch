@@ -82,6 +82,17 @@ namespace Sketch
 		return hashSize;
 	}
 
+	int KSSD::get_half_k(){
+		return half_k;
+	}
+	
+	int KSSD::get_half_subk(){
+		return half_subk;
+	}
+	int KSSD::get_drlevel(){
+		return drlevel;
+	}
+
 	vector<uint64_t> KSSD::storeHashes(){
 		return hashList;
 	}

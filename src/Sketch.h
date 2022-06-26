@@ -242,6 +242,9 @@ namespace Sketch{
 			void printHashes();
 			vector<uint64_t> storeHashes();
 			void loadHashes(vector<uint64_t> hashArr);
+			int get_half_k();
+			int get_half_subk();
+			int get_drlevel();
 	
 		private:
 			int half_k;
