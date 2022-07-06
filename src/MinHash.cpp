@@ -766,7 +766,7 @@ void MinHash::heapToList()
 		hashlist.hashes32.insert(hashlist.hashes32.end(), tmpHashlist.hashes32.begin(), tmpHashlist.hashes32.end());
 	hashlist.sort();
 	if(use64){
-		unordered_set<uint64_t> mergedSet;
+		robin_hood::unordered_set<uint64_t> mergedSet;
 		for(int i = 0; i < hashlist.size(); i++){
 			mergedSet.insert(hashlist.hashes64[i]);
 			if(mergedSet.size() >= sketchSize) break;
@@ -776,12 +776,12 @@ void MinHash::heapToList()
 			hashlist.hashes64.push_back(*i);
 		}
 		//clear mergedSet and free memory
-		unordered_set<uint64_t>().swap(mergedSet);
+		robin_hood::unordered_set<uint64_t>().swap(mergedSet);
 
 
 	}
 	else{
-		unordered_set<uint32_t> mergedSet;
+		robin_hood::unordered_set<uint32_t> mergedSet;
 		for(int i = 0; i < hashlist.size(); i++){
 			mergedSet.insert(hashlist.hashes32[i]);
 			if(mergedSet.size() >= sketchSize) break;
@@ -791,7 +791,7 @@ void MinHash::heapToList()
 			hashlist.hashes32.push_back(*i);
 		}
 		//clear mergedSet and free memory
-		unordered_set<uint32_t>().swap(mergedSet);
+		robin_hood::unordered_set<uint32_t>().swap(mergedSet);
 	}
 
 	hashlist.sort();
@@ -852,30 +852,30 @@ void MinHash::merge(MinHash& msh)
 		reference.hashesSorted.hashes32.insert(reference.hashesSorted.hashes32.end(), msh.reference.hashesSorted.hashes32.begin(), msh.reference.hashesSorted.hashes32.end());
 	reference.hashesSorted.sort();
 	if(use64){
-		unordered_set<uint64_t> mergedSet;
+		robin_hood::unordered_set<uint64_t> mergedSet;
 		for(int i = 0; i < reference.hashesSorted.hashes64.size(); i++){
 			mergedSet.insert(reference.hashesSorted.hashes64[i]);
 			if(mergedSet.size() >= sketchSize) break;
 		}
 		reference.hashesSorted.clear();
-		for(auto i = mergedSet.begin(); i != mergedSet.end(); i++){
+		for(auto i = mergedSet.begin(); i != mergedSet.end(); ++i){
 			reference.hashesSorted.hashes64.push_back(*i);
 		}
 		//clear mergedSet and free memory
-		unordered_set<uint64_t>().swap(mergedSet);
+		robin_hood::unordered_set<uint64_t>().swap(mergedSet);
 	}
 	else{
-		unordered_set<uint32_t> mergedSet;
+		robin_hood::unordered_set<uint32_t> mergedSet;
 		for(int i = 0; i < reference.hashesSorted.hashes32.size(); i++){
 			mergedSet.insert(reference.hashesSorted.hashes32[i]);
 			if(mergedSet.size() >= sketchSize) break;
 		}
 		reference.hashesSorted.clear();
-		for(auto i = mergedSet.begin(); i != mergedSet.end(); i++){
+		for(auto i = mergedSet.begin(); i != mergedSet.end(); ++i){
 			reference.hashesSorted.hashes32.push_back(*i);
 		}
 		//clear mergedSet and free memory
-		unordered_set<uint32_t>().swap(mergedSet);
+		robin_hood::unordered_set<uint32_t>().swap(mergedSet);
 	}
 
 	reference.hashesSorted.sort();
