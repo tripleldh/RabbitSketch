@@ -60,24 +60,24 @@ namespace Sketch
 		if(primer_id < 0 || primer_id > 24)
 		{
 			int k_add = primer_id < 0 ? (1 + (0 - primer_id) / 4) : -1 * (1 + (primer_id - 24) / 4);
-			fprintf(stderr, "get_hashSize(): primer_id: %d out of range(0 ~ 24), by formula:\n"
-									"int primer_id = 4 * (half_k - drlevel) - CTX_SPC_USE_L - 7;\n"
-									"this might caused by too small or too large k\n"
-									"half kmer length = %d\n"
-									"dim reduction level %d\n"
-									"ctx_space size = %llu\n"
-									"try rerun the program with option -k = %d\n",
-									primer_id, half_k, drlevel, ctx_space_sz, half_k + k_add);
+			//fprintf(stderr, "get_hashSize(): primer_id: %d out of range(0 ~ 24), by formula:\n"
+			//						"int primer_id = 4 * (half_k - drlevel) - CTX_SPC_USE_L - 7;\n"
+			//						"this might caused by too small or too large k\n"
+			//						"half kmer length = %d\n"
+			//						"dim reduction level %d\n"
+			//						"ctx_space size = %llu\n"
+			//						"try rerun the program with option -k = %d\n",
+			//						primer_id, half_k, drlevel, ctx_space_sz, half_k + k_add);
 	
 		}
 		int hashSize = primer[primer_id];
-		fprintf(stderr, "dimension reduced %d\n"
-										"ctx_space size  %llu\n"
-										"half_k is: %d\n"
-										"drlevel is: %d\n"
-										"primer_id is: %d\n"
-										"hashSize is: %u \n",
-										dim_reduce_rate, ctx_space_sz, half_k, drlevel, primer_id, hashSize);
+		//fprintf(stderr, "dimension reduced %d\n"
+		//								"ctx_space size  %llu\n"
+		//								"half_k is: %d\n"
+		//								"drlevel is: %d\n"
+		//								"primer_id is: %d\n"
+		//								"hashSize is: %u \n",
+		//								dim_reduce_rate, ctx_space_sz, half_k, drlevel, primer_id, hashSize);
 		
 		return hashSize;
 	}
