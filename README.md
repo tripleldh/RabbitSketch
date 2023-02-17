@@ -24,7 +24,7 @@ export LD_LIBRARY_PATH=`pwd`/lib:$LD_LIBRARY_PATH
 cd ../examples/
 #default install dir: ../build/
 make 
-./minhash genome1.fna genome2.fna
+./main genome.fna
 ```
 
 We will get the value of jaccard and distance.
