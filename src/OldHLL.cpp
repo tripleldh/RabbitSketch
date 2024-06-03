@@ -359,43 +359,23 @@ inline void _mm256_fake_scatter_epi32(uint32_t *mem_addr, __m256i vindex, __m256
 }
 */
 
-
 template<typename T>
 void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::vector<uint8_t> &sketch2, T &c1, T &c2, T &cu, T &cg1, T &cg2, T &ceq) const {
 	assert(sketch1.size()==sketch2.size());//
 	std::array<uint32_t, 64> c1l{0}, c2l{0}, c1g{0}, c2g{0};
 	/* */
-//#pragma vector aligned
-//#pragma omp simd aligned(sketch1, sketch2, c1l, c2l, c1g, c2g, ceq : 64)
+#pragma vector aligned
 	for(uint64_t i=0; i<sketch1.size(); ++i) {
-//  __asm__ __volatile__("DEBUG0:":::);
-    uint8_t idx1 = sketch1[i];
-    uint8_t idx2 = sketch2[i];
-    int num =(idx1 < idx2);
-    //int num = ((idx1 - idx2) >> 31) & 1;
-    int num1 = (idx1 == idx2);
-
-    c1l[idx1] += num;
-    c2g[idx2] += num;
-
-    c1g[idx1] += 1 - num - num1;
-    c2l[idx2] += 1 - num - num1;
-
-    ceq[idx1] += num1;
-
-//  __asm__ __volatile__("DEBUG1:":::);
-  
-
 		//TODO: SIMD
-		//if(sketch1[i]<sketch2[i]){
-		//	c1l[sketch1[i]]++;
-		//	c2g[sketch2[i]]++;
-		//} else if(sketch1[i]>sketch2[i]){
-		//	c1g[sketch1[i]]++;
-		//	c2l[sketch2[i]]++;
-		//} else{
-		//	ceq[sketch1[i]]++;
-		//}
+		if(sketch1[i]<sketch2[i]){
+			c1l[sketch1[i]]++;
+			c2g[sketch2[i]]++;
+		} else if(sketch1[i]>sketch2[i]){
+			c1g[sketch1[i]]++;
+			c2l[sketch2[i]]++;
+		} else{
+			ceq[sketch1[i]]++;
+		}
 	}
 	/* 
 	   std::vector<uint32_t> sketch32_1, sketch32_2;
@@ -421,93 +401,47 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 
 
 // TODO: using SIMD to accelerate
- void HyperLogLog::update(char* seq) {
- 	//reverse&complenment
- 	const uint64_t LENGTH = strlen(seq);
- 	for(uint64_t i = 0; i < LENGTH; i++){
- 		if(seq[i] > 96 && seq[i] < 123){
- 			seq[i] -= 32;
- 		}
- 	}
- 	char* seqRev;
- 	seqRev = new char[LENGTH];
- 	char table[4] = {'T','G','A','C'};
- 	for ( uint64_t i = 0; i < LENGTH; i++ )
- 	{
- 		char base = seq[i];
- 		base >>= 1;
- 		base &= 0x03;
- 		seqRev[LENGTH - i - 1] = table[base];
- 	}
- 	//sequence -> kmer
- 	//fprintf(stderr, "seqRev = %s \n", seqRev);
- 	const int KMERLEN = 32;
- 	if(LENGTH < KMERLEN) return;
- 	for(uint64_t i=0; i<LENGTH-KMERLEN; ++i) {
- 		//char kmer[KMERLEN+1];
- 		char kmer_fwd[KMERLEN+1];
- 		char kmer_rev[KMERLEN+1];
- 		memcpy(kmer_fwd, seq+i, KMERLEN);
- 		memcpy(kmer_rev, seqRev+LENGTH-i-KMERLEN, KMERLEN);
- 		kmer_fwd[KMERLEN] = '\0';
- 		kmer_rev[KMERLEN] = '\0';
- 		if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
- 			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
- 			addh(kmer_fwd);
- 		} else {
- 			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
- 			addh(kmer_rev);
- 		}
- 
- 	}
- 	delete [] seqRev;
- }
- 
-//void HyperLogLog::update(char* seq) {
-//    const uint64_t LENGTH = strlen(seq);
-//    #pragma omp parallel for
-//    for(uint64_t i = 0; i < LENGTH; i++){
-//        if(seq[i] > 96 && seq[i] < 123){
-//            seq[i] -= 32;
-//        }
-//    }
-//
-//    char* seqRev;
-//    seqRev = new char[LENGTH];
-//    char table[4] = {'T','G','A','C'};
-//    #pragma omp parallel for
-//    for ( uint64_t i = 0; i < LENGTH; i++ )
-//    {
-//        char base = seq[i];
-//        base >>= 1;
-//        base &= 0x03;
-//        seqRev[LENGTH - i - 1] = table[base];
-//    }
-//
-//    const int KMERLEN = 32;
-//    if(LENGTH < KMERLEN) {
-//        delete [] seqRev;
-//        return;
-//    }
-//
-//    #pragma omp parallel for
-//    for(uint64_t i=0; i<LENGTH-KMERLEN; ++i) {
-//        char kmer_fwd[KMERLEN+1];
-//        char kmer_rev[KMERLEN+1];
-//        memcpy(kmer_fwd, seq+i, KMERLEN);
-//        memcpy(kmer_rev, seqRev+LENGTH-i-KMERLEN, KMERLEN);
-//        kmer_fwd[KMERLEN] = '\0';
-//        kmer_rev[KMERLEN] = '\0';
-//        if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
-//            addh(kmer_fwd);
-//        } else {
-//            addh(kmer_rev);
-//        }
-//    }
-//
-//    delete [] seqRev;
-//}
-//
+void HyperLogLog::update(char* seq) {
+	//reverse&complenment
+	const uint64_t LENGTH = strlen(seq);
+	for(uint64_t i = 0; i < LENGTH; i++){
+		if(seq[i] > 96 && seq[i] < 123){
+			seq[i] -= 32;
+		}
+	}
+	char* seqRev;
+	seqRev = new char[LENGTH];
+	char table[4] = {'T','G','A','C'};
+	for ( uint64_t i = 0; i < LENGTH; i++ )
+	{
+		char base = seq[i];
+		base >>= 1;
+		base &= 0x03;
+		seqRev[LENGTH - i - 1] = table[base];
+	}
+	//sequence -> kmer
+	//fprintf(stderr, "seqRev = %s \n", seqRev);
+	const int KMERLEN = 32;
+	if(LENGTH < KMERLEN) return;
+	for(uint64_t i=0; i<LENGTH-KMERLEN; ++i) {
+		//char kmer[KMERLEN+1];
+		char kmer_fwd[KMERLEN+1];
+		char kmer_rev[KMERLEN+1];
+		memcpy(kmer_fwd, seq+i, KMERLEN);
+		memcpy(kmer_rev, seqRev+LENGTH-i-KMERLEN, KMERLEN);
+		kmer_fwd[KMERLEN] = '\0';
+		kmer_rev[KMERLEN] = '\0';
+		if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
+			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
+			addh(kmer_fwd);
+		} else {
+			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
+			addh(kmer_rev);
+		}
+
+	}
+	delete [] seqRev;
+}
 
 HyperLogLog HyperLogLog::merge(const HyperLogLog &other) const {
 	if(other.p() != p())
@@ -586,6 +520,7 @@ double HyperLogLog::jaccard_index(const HyperLogLog &h2) const {
 	const double ret = (creport() + h2.creport() - us) / us;
 	return std::max(0., ret);
 }
+
 
 template<typename T>
 double HyperLogLog::ertl_ml_estimate(const T& c, unsigned p, unsigned q, double relerr) const {

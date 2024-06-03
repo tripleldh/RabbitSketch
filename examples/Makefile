@@ -2,7 +2,7 @@
 TARGET=main
 
 CXX=g++
-CXXFLAGS=-g -O2 -std=c++14
+CXXFLAGS=-g -O2 -std=c++14 -fopenmp
 
 INCLUDE=../build/include
 LIBS=../build/lib
@@ -15,7 +15,7 @@ $(TARGET):$(OBJECTS)
 
 #%.o:%.cpp
 #test.o:test.cpp
-main.o:main.cpp
+main.o:test_KSSD.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@ -I$(INCLUDE) -lz
 
 
