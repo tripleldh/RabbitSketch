@@ -430,7 +430,7 @@ namespace Sketch{
 
 		public:
 			/// OrderMinHash constructor
-			OrderMinHash(){};
+			OrderMinHash() : seq(nullptr), rcseq(nullptr), m_k(21), m_l(2), m_m(500), rc(false), mtSeed(32)  {};
 			/// OrderMinHash constructor for sketching sequences using default parameters
 			OrderMinHash(char * seqNew);
 			~OrderMinHash() {if (rcseq != NULL) delete rcseq;};
@@ -522,7 +522,7 @@ namespace Sketch{
 			HyperLogLog merge(const HyperLogLog &other) const;
 			void printSketch();
 			double distance(const HyperLogLog &h2) const {return 1.0 - jaccard_index(h2);}
-			double jaccard_index(HyperLogLog &h2); 
+			//double jaccard_index(HyperLogLog &h2); 
 			double jaccard_index(const HyperLogLog &h2) const; 
 
 		protected:
