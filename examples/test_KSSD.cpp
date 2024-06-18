@@ -52,7 +52,6 @@ int main(int argc, char* argv[])
     tmpF.fileName = fileName;
     fileList.push_back(tmpF);
   }
-  double t1 = get_sec();
   vector<string> fileArr;
   for(size_t i = 0; i < fileList.size(); i++){
     fileArr.push_back(fileList[i].fileName);
@@ -65,6 +64,7 @@ int main(int argc, char* argv[])
 	Sketch::KSSDParameters kssdPara(half_k, half_subk, drlevel);
 	vector<Sketch::KSSD *> vkssd;
   cerr << "=====total small files: " << small_file_number << endl;
+  double t1 = get_sec();
 	vector<string> resFileName;
 	#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
   for(size_t t = 0; t <small_file_number; t++)
@@ -83,21 +83,21 @@ int main(int argc, char* argv[])
         break;
  			}
 
-		kssd->update(ks1->seq.s);
+			kssd->update(ks1->seq.s);
+		}
 		#pragma omp critical
       {
 		  	vkssd.push_back(kssd);
 				resFileName.push_back(fileArr[t]);
       }
 
-    }//end while, read the file
+    //end while, read the file
     gzclose(fp1);
     kseq_destroy(ks1);
   }
   double t2 = get_sec();
   cerr << "sketch time is: " << t2 - t1 << endl;
   
-  vector<FILE*> fp_arr(numThreads);
 
 	string cmd = "mkdir -p res_dir";
 	int ret = system(cmd.c_str());
@@ -109,43 +109,34 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 	string prefixName = "res_dir/res.dist.";
-	
-	#define MAX_BUFFER_SIZE 400*1024*1024
-	
-	#pragma omp parallel num_threads(numThreads)
-	{
-	    int tid = omp_get_thread_num();
-	    string fileName = prefixName + to_string(tid);
-	    fp_arr[tid] = fopen(fileName.c_str(), "w+");
-	    
-	    stringstream buffer;
-	    
-	    #pragma omp for schedule(dynamic)
-	    for (int i = 0; i < fileArr.size(); i++) {
-	        for (int j = i + 1; j < fileArr.size(); j++) {
-	            //double distance1 = vkssd[i]->distance(vkssd[j]);
-							double distance1 = vkssd[i]->distance(vkssd[j]);
-		    if(distance1 <thres){
-	            buffer << resFileName[i] << "\t" << resFileName[j] << "\t" << distance1 << "\n";
-	            if (buffer.tellp() >= MAX_BUFFER_SIZE || (i == fileArr.size() - 1 && j == fileArr.size() - 1)) {
-	                fprintf(fp_arr[tid], "%s", buffer.str().c_str());
-	                fflush(fp_arr[tid]);
-			buffer.str(""); // 清空缓冲区
-	            }
-	        }
-	      }
-	    }
-	     
-	   if (buffer.tellp() > 0) {
-		 fprintf(fp_arr[tid], "%s", buffer.str().c_str());
-	         fflush(fp_arr[tid]);
-	    }
-	   fclose(fp_arr[tid]);
-	}
-	
-	double t3 = get_sec();
-	cerr << "dist time is: " << t3 - t2 << endl;
 
+	vector<FILE*> fp_arr;
+	for(int i = 0; i < numThreads; i++){
+		string file_name = "res_dir/res.dist." + to_string(i);
+		FILE* fp = fopen(file_name.c_str(), "w+");
+		fp_arr.push_back(fp);
+	}
+
+	cerr << "v size is: " << vkssd.size() << endl;
+
+	#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
+	for(int i = 0; i < vkssd.size(); i++){
+		int tid = omp_get_thread_num();
+		for(int j = i+1; j < vkssd.size(); j++){
+			double dist = vkssd[i]->distance(vkssd[j]);
+			if(dist < thres){
+				fprintf(fp_arr[tid], "%s\t%s\t%ld\n", resFileName[i].c_str(), resFileName[j].c_str(), dist);
+			}
+		}
+	}
+	for(int i = 0; i < numThreads; i++){
+		fclose(fp_arr[i]);
+	}
+
+
+
+  double t3 = get_sec();
+  cerr << "dist time is: " << t3 - t2 << endl;
 }
 
 

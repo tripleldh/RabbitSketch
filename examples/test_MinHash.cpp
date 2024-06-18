@@ -44,18 +44,20 @@ int main(int argc, char* argv[])
   vector<fileInfo_t> fileList;
   uint64_t totalSize = 0;
   string fileName;
-  while(getline(fs, fileName)){
-    struct stat cur_stat;
-    stat(fileName.c_str(), &cur_stat);
-    fileInfo_t tmpF;
-    tmpF.fileName = fileName;
-    fileList.push_back(tmpF);
-  }
-  double t1 = get_sec();
   vector<string> fileArr;
-  for(size_t i = 0; i < fileList.size(); i++){
-    fileArr.push_back(fileList[i].fileName);
+  while(getline(fs, fileName)){
+		fileArr.push_back(fileName);
+    //struct stat cur_stat;
+    //stat(fileName.c_str(), &cur_stat);
+    //fileInfo_t tmpF;
+    //tmpF.fileName = fileName;
+    //fileList.push_back(tmpF);
   }
+
+  double t1 = get_sec();
+  //for(size_t i = 0; i < fileList.size(); i++){
+  //  fileArr.push_back(fileList[i].fileName);
+  //}
   int small_file_number = fileArr.size();
   vector<Sketch::MinHash *> vmh;
  
