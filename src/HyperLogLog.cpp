@@ -430,6 +430,8 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
  			seq[i] -= 32;
  		}
  	}
+
+	uint32_t qq = q();
  	char* seqRev;
  	seqRev = new char[LENGTH];
  	char table[4] = {'T','G','A','C'};
@@ -510,62 +512,119 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 // 
 // 	}
 //
+//
+#if defined __AVX512F__  && defined __AVX512DQ__
+	//__m512i vzero   = _mm512_set1_epi64(0);
+	__m512i vconst0 = _mm512_set1_epi64(0xff51afd7ed558ccd);
+	__m512i vconst1 = _mm512_set1_epi64(0xc4ceb9fe1a85ec53);
+//	__mmask8 weight_msk = l > 0 ? 0xFF : 0x00;
+	//fprintf(stderr, "using AVX512\n");
+#endif
+#if defined __AVX512F__  && defined __AVX512CD__
+	__m512i v1 = _mm512_set1_epi64(1);
+#endif 
+
  	for(uint64_t i=0; i<((LENGTH-KMERLEN)/lanes)*lanes; i+=lanes) 
  	//for(uint64_t i=0; i<LENGTH-KMERLEN; ++i) 
 	{
-		for (int j = i; j< i + lanes; j++)
+		char kmer_fwd[8*(KMERLEN+1)];
+		char kmer_rev[8*(KMERLEN+1)];
+		const char * this_kmer;
+		uint64_t resv[8];
+		for (int j = 0; j< lanes; j++)
 		{
-		char kmer_fwd[KMERLEN+1];
-		char kmer_rev[KMERLEN+1];
-		memcpy(kmer_fwd, seq+j, KMERLEN);
-		memcpy(kmer_rev, seqRev+LENGTH-j-KMERLEN, KMERLEN);
-		kmer_fwd[KMERLEN] = '\0';
-		kmer_rev[KMERLEN] = '\0';
-		if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
+			memcpy(&kmer_fwd[j*(KMERLEN+1)], seq+i+j, KMERLEN);
+			memcpy(&kmer_rev[j*(KMERLEN+1)], seqRev+LENGTH-(i+j)-KMERLEN, KMERLEN);
+			kmer_fwd[j*(KMERLEN+1) + KMERLEN] = '\0';
+			kmer_rev[j*(KMERLEN+1) + KMERLEN] = '\0';
+
+			if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
+				this_kmer = kmer_fwd;
+			}else {
+				this_kmer = kmer_rev;
+			}
+ 			uint64_t res = 0;
+	        for(int i = 0; i < KMERLEN; i++)
+	        {
+		    	uint8_t meri = (uint8_t)this_kmer[i];
+		    	meri &= 0x06;
+		    	meri >>= 1;
+		    	res |= (uint64_t)meri;
+		    	res << 2;
+			}
+			resv[j] = res;
+		}
+
+		//int hash
+		//for (int j = i; j< i + lanes; j++)
+		uint64_t hashvalv[8];
+
 			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
 			//addh(kmer_fwd);
- 			uint64_t res = 0;
-	        for(int i = 0; i < KMERLEN; i++)
-	        {
-		    	uint8_t meri = (uint8_t)kmer_fwd[i];
-		    	meri &= 0x06;
-		    	meri >>= 1;
-		    	res |= (uint64_t)meri;
-		    	res << 2;
-			}
-			uint64_t hashval = mc::murmur3_fmix(res, 42);
-			const uint32_t index(hashval >> q());
-			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
-			core_[index] = std::max(core_[index], lzt);
-#if LZ_COUNTER
-			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
-#endif
+		#if defined __AVX512F__ && __AVX512DQ__
+		//using AVX512
+		//__m512i va = _mm512_loadu_si512((void *)&intHash[id + 0 * 8]);
+		//__m512i vocc = _mm512_loadu_si512((void *)&occ[id + 0 * 8]);
+		//__m512i vb = _mm512_mask_add_epi64(va, weight_msk, va, vocc);
 
-		} else {
-			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
-//			addh(kmer_rev);
- 			uint64_t res = 0;
-	        for(int i = 0; i < KMERLEN; i++)
-	        {
-		    	uint8_t meri = (uint8_t)kmer_rev[i];
-		    	meri &= 0x06;
-		    	meri >>= 1;
-		    	res |= (uint64_t)meri;
-		    	res << 2;
-			}
-			uint64_t hashval = mc::murmur3_fmix(res, 42);
-			const uint32_t index(hashval >> q());
-			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
-			core_[index] = std::max(core_[index], lzt);
+		__m512i vb = _mm512_loadu_si512((void *)resv);
+		__m512i vseed = _mm512_set1_epi64(42);
+		__m512i va = _mm512_xor_epi64(vb, vseed);
+		__m512i vtmp = _mm512_srli_epi64(va, 33);
+		vb = _mm512_xor_epi64(va, vtmp);
+		va = _mm512_mullo_epi64(vb, vconst0);
+		vtmp = _mm512_srli_epi64(va, 33);
+		vb = _mm512_xor_epi64(va, vtmp);
+		va = _mm512_mullo_epi64(vb, vconst1);
+		vtmp = _mm512_srli_epi64(va, 33);
+		vb = _mm512_xor_epi64(va, vtmp);
+		_mm512_storeu_si512(hashvalv, vb);
+
+		#else	
+		for (int j = 0; j< lanes; j++)
+			hashvalv[j] = mc::murmur3_fmix(resv[j], 42);
+		#endif
+		uint64_t indexv[8];
+		uint64_t lztv[8];
+		//#if 0
+		#if defined __AVX512CD__  && __AVX512F__
+		//indexv[j] = hashvalv[j] >> qq;
+		__m512i vhash = _mm512_loadu_si512((void*)hashvalv);
+		__m512i vindex = _mm512_srli_epi64(vhash, (uint8_t)qq);	
+		_mm512_storeu_si512(indexv, vindex);
+
+		//lztv[j] = clz(((hashvalv[j] << 1)|1) << (np_ - 1)) + 1;
+		__m512i vlzhash = _mm512_slli_epi64(vhash, 1);
+		vhash = _mm512_or_epi64(vlzhash, v1);
+		vlzhash = _mm512_slli_epi64(vhash, (uint8_t)(np_ - 1));
+		vhash = _mm512_lzcnt_epi64(vlzhash);
+		vlzhash = _mm512_add_epi64(vhash, v1);
+		_mm512_storeu_si512(lztv, vlzhash);
+
+		#else 
+
+		for (int j = 0; j< lanes; j++)
+		{
+			//const uint32_t index(hashvalv[j] >> q());
+			indexv[j] = hashvalv[j] >> qq;
+			//const uint8_t lzt(clz(((hashvalv[j] << 1)|1) << (np_ - 1)) + 1);
+			lztv[j] = clz(((hashvalv[j] << 1)|1) << (np_ - 1)) + 1;
+ 		}
+
+		#endif 
+
+		for (int j = 0; j< lanes; j++)
+		{
+			//core_[uint32_t(indexv[j])] = std::max(core_[(uint32_t)(indexv[j])], (uint8_t)lztv[j]);
+			core_[indexv[j]] = std::max(core_[indexv[j]], (uint8_t)lztv[j]);
 #if LZ_COUNTER
-			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
+			++clz_counts_[clz(((hashvalv[j] << 1)|1) << (np_ - 1)) + 1];
+			//++clz_counts_[lztv[j]];
 #endif
 
 		}
-		}
- 
- 	}
 
+	}
 
 
 	//remainder
