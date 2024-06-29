@@ -1,7 +1,8 @@
 //#include <zlib.h>
 #include "HyperLogLog.h"
 #include "Sketch.h"
-#include  "MurmurHash3.h"
+#include "MurmurHash3.h"
+#include "hash_int.h"
 //#include "x86intrin.h"
 //#include "immintrin.h"
 
@@ -443,23 +444,184 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
  	//fprintf(stderr, "seqRev = %s \n", seqRev);
  	const int KMERLEN = 32;
  	if(LENGTH < KMERLEN) return;
- 	for(uint64_t i=0; i<LENGTH-KMERLEN; ++i) {
- 		//char kmer[KMERLEN+1];
- 		char kmer_fwd[KMERLEN+1];
- 		char kmer_rev[KMERLEN+1];
- 		memcpy(kmer_fwd, seq+i, KMERLEN);
- 		memcpy(kmer_rev, seqRev+LENGTH-i-KMERLEN, KMERLEN);
- 		kmer_fwd[KMERLEN] = '\0';
- 		kmer_rev[KMERLEN] = '\0';
- 		if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
- 			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
- 			addh(kmer_fwd);
- 		} else {
- 			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
- 			addh(kmer_rev);
- 		}
+	int lanes = 8;
+	//remainder
+// 	for(uint64_t i=0; i<((LENGTH-KMERLEN)/lanes)*lanes; i+=lanes) 
+//	{
+// 	//for(uint64_t i=((LENGTH-KMERLEN)/lanes)*lanes; i<LENGTH-KMERLEN; ++i) 
+// 		//char kmer[KMERLEN+1];
+// 		char kmer_fwd[KMERLEN+1];
+// 		char kmer_rev[KMERLEN+1];
+// 		memcpy(kmer_fwd, seq+i, KMERLEN);
+// 		memcpy(kmer_rev, seqRev+LENGTH-i-KMERLEN, KMERLEN);
+// 		kmer_fwd[KMERLEN] = '\0';
+// 		kmer_rev[KMERLEN] = '\0';
+//
+// 		if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
+// 			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
+// 			//addh(kmer_fwd);
+// 			//calc 64bit int hashes and count leading zero
+// 			//step1 hash to int
+// 			//step2 call int hash 
+// 			//step3 lzcnt
+// 		    //uint8_t mask = 0x06; //FIXME: not general only works for DNA sequences, it's just a trick.
+//	        uint64_t res = 0;
+//	        for(int i = 0; i < KMERLEN; i++)
+//	        {
+//		    	uint8_t meri = (uint8_t)kmer_fwd[i];
+//		    	meri &= 0x06;
+//		    	meri >>= 1;
+//		    	res |= (uint64_t)meri;
+//		    	res << 2;
+//			}
+//			uint64_t hashval = mc::murmur3_fmix(res, 42);
+//			const uint32_t index(hashval >> q());
+//			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
+//			core_[index] = std::max(core_[index], lzt);
+//#if LZ_COUNTER
+//			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
+//#endif
+//
+//			
+// 		} else {
+// 			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
+// 			//calc 64bit hashes and count leading zero
+// 			//addh(kmer_rev);
+// 			//	        
+// 			uint64_t res = 0;
+//	        for(int i = 0; i < KMERLEN; i++)
+//	        {
+//		    	uint8_t meri = (uint8_t)kmer_rev[i];
+//		    	meri &= 0x06;
+//		    	meri >>= 1;
+//		    	res |= (uint64_t)meri;
+//		    	res << 2;
+//			}
+//			uint64_t hashval = mc::murmur3_fmix(res, 42);
+//			const uint32_t index(hashval >> q());
+//			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
+//			core_[index] = std::max(core_[index], lzt);
+//#if LZ_COUNTER
+//			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
+//#endif
+// 			
+// 		}
+//		//fprintf(stderr,"calling int hashes\n");
+// 
+// 	}
+//
+ 	for(uint64_t i=0; i<((LENGTH-KMERLEN)/lanes)*lanes; i+=lanes) 
+ 	//for(uint64_t i=0; i<LENGTH-KMERLEN; ++i) 
+	{
+		for (int j = i; j< i + lanes; j++)
+		{
+		char kmer_fwd[KMERLEN+1];
+		char kmer_rev[KMERLEN+1];
+		memcpy(kmer_fwd, seq+j, KMERLEN);
+		memcpy(kmer_rev, seqRev+LENGTH-j-KMERLEN, KMERLEN);
+		kmer_fwd[KMERLEN] = '\0';
+		kmer_rev[KMERLEN] = '\0';
+		if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
+			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
+			//addh(kmer_fwd);
+ 			uint64_t res = 0;
+	        for(int i = 0; i < KMERLEN; i++)
+	        {
+		    	uint8_t meri = (uint8_t)kmer_fwd[i];
+		    	meri &= 0x06;
+		    	meri >>= 1;
+		    	res |= (uint64_t)meri;
+		    	res << 2;
+			}
+			uint64_t hashval = mc::murmur3_fmix(res, 42);
+			const uint32_t index(hashval >> q());
+			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
+			core_[index] = std::max(core_[index], lzt);
+#if LZ_COUNTER
+			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
+#endif
+
+		} else {
+			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
+//			addh(kmer_rev);
+ 			uint64_t res = 0;
+	        for(int i = 0; i < KMERLEN; i++)
+	        {
+		    	uint8_t meri = (uint8_t)kmer_rev[i];
+		    	meri &= 0x06;
+		    	meri >>= 1;
+		    	res |= (uint64_t)meri;
+		    	res << 2;
+			}
+			uint64_t hashval = mc::murmur3_fmix(res, 42);
+			const uint32_t index(hashval >> q());
+			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
+			core_[index] = std::max(core_[index], lzt);
+#if LZ_COUNTER
+			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
+#endif
+
+		}
+		}
  
  	}
+
+
+
+	//remainder
+ 	for(uint64_t i=((LENGTH-KMERLEN)/lanes)*lanes; i<LENGTH-KMERLEN; ++i) 
+ 	//for(uint64_t i=0; i<LENGTH-KMERLEN; ++i) 
+	{
+		char kmer_fwd[KMERLEN+1];
+		char kmer_rev[KMERLEN+1];
+		memcpy(kmer_fwd, seq+i, KMERLEN);
+		memcpy(kmer_rev, seqRev+LENGTH-i-KMERLEN, KMERLEN);
+		kmer_fwd[KMERLEN] = '\0';
+		kmer_rev[KMERLEN] = '\0';
+		if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
+			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
+			//addh(kmer_fwd);
+ 			uint64_t res = 0;
+	        for(int i = 0; i < KMERLEN; i++)
+	        {
+		    	uint8_t meri = (uint8_t)kmer_fwd[i];
+		    	meri &= 0x06;
+		    	meri >>= 1;
+		    	res |= (uint64_t)meri;
+		    	res << 2;
+			}
+			uint64_t hashval = mc::murmur3_fmix(res, 42);
+			const uint32_t index(hashval >> q());
+			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
+			core_[index] = std::max(core_[index], lzt);
+#if LZ_COUNTER
+			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
+#endif
+
+		} else {
+			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
+			//addh(kmer_rev);
+ 			uint64_t res = 0;
+	        for(int i = 0; i < KMERLEN; i++)
+	        {
+		    	uint8_t meri = (uint8_t)kmer_rev[i];
+		    	meri &= 0x06;
+		    	meri >>= 1;
+		    	res |= (uint64_t)meri;
+		    	res << 2;
+			}
+			uint64_t hashval = mc::murmur3_fmix(res, 42);
+			const uint32_t index(hashval >> q());
+			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
+			core_[index] = std::max(core_[index], lzt);
+#if LZ_COUNTER
+			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
+#endif
+
+		}
+ 
+ 	}
+
  	delete [] seqRev;
  }
  

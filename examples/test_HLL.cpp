@@ -116,7 +116,7 @@ int main(int argc, char* argv[])
 		for(int j = i+1; j < vhlog.size(); j++){
 			double dist = vhlog[i].distance(vhlog[j]);
 			if(dist < thres){
-				fprintf(fp_arr[tid], "%s\t%s\t%ld\n", resFileName[i].c_str(), resFileName[j].c_str(), dist);
+				fprintf(fp_arr[tid], "%s\t%s\t%lf\n", resFileName[i].c_str(), resFileName[j].c_str(), dist);
 			}
 		}
 	}
