@@ -66,5 +66,5 @@ sketch.SKETCH_ALGORITHM.
 ```
 ** case study for multi-thread sketch building with Python API
 ```bash
-python multi_minhash.py
+python multi_minhash.py #require pymp
 
