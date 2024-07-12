@@ -24,10 +24,16 @@ export LD_LIBRARY_PATH=`pwd`/lib:$LD_LIBRARY_PATH
 cd ../examples/
 #default install dir: ../build/
 make 
-./main genome.fna
+./exe_main genome.fna
 ```
 
 We will get the value of jaccard and distance.
+
+or:
+```bash
+./exe_SKETCH_ALGORITHM FILE_PATH threshold(0.05) thread_num 
+```
+We will get the distance among large-scale genome sequences.
 
 ### PYTHON bind
 **pip install:**
@@ -49,7 +55,16 @@ cmake .. #default with pybind support
 make
 ```
 **test using bpython or python**
+
 ```bash
 cd examples
-time python3 test.py #fastx is required
+python pysketch #require fastx
 ```
+We will get the Jaccard index among large-scale genome sequences with Python API. To change the algorithm, simply modify 
+```bash 
+sketch.SKETCH_ALGORITHM.
+```
+** case study for multi-thread sketch building with Python API
+```bash
+python multi_minhash.py
+

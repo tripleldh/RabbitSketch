@@ -12,7 +12,9 @@
 #include <stdint.h>
 #include <math.h>
 #include <unordered_set>
-
+#include <sstream>
+#include <vector>
+#include <string>
 #ifndef NOPYTHON
 #include "pybind.h"
 #endif
@@ -802,18 +804,29 @@ void MinHash::heapToList()
 
 }
 
-void MinHash::printMinHashes()
+//void MinHash::printMinHashes()
+//{
+//	for(int i = 0; i < reference.hashesSorted.size(); i++){
+//		if(use64)
+//			cerr << "hash64 " <<  i << " " << reference.hashesSorted.at(i).hash64 << endl;
+//		else
+//			cerr << "hash32 " <<  i << " " << reference.hashesSorted.at(i).hash32 << endl;
+//	}
+//	return;
+//}
+std::string MinHash::printMinHashes() 
 {
-	for(int i = 0; i < reference.hashesSorted.size(); i++){
-		if(use64)
-			cerr << "hash64 " <<  i << " " << reference.hashesSorted.at(i).hash64 << endl;
-		else
-			cerr << "hash32 " <<  i << " " << reference.hashesSorted.at(i).hash32 << endl;
-	}
-	return;
-}
+    std::stringstream result;
 
-vector<uint64_t> MinHash::storeMinHashes()
+    for (int i = 0; i < reference.hashesSorted.size(); i++) {
+        if (use64)
+            result << "hash64 " << i << " " << reference.hashesSorted.at(i).hash64 << "\n";
+        else
+            result << "hash32 " << i << " " << reference.hashesSorted.at(i).hash32 << "\n";
+    }
+    return result.str();
+}
+vector<uint64_t>  MinHash::storeMinHashes()
 {
 	vector<uint64_t> res;
 	for(int i = 0; i < reference.hashesSorted.size(); i++){

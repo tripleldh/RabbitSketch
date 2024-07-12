@@ -23,8 +23,8 @@ with pymp.Parallel(128) as p:
             kssd = sketch.MinHash()
             for name, seq, qual in fastx.Fastx(file_list[index]):
                 kssd.update(seq)
-            #sketcharr[p.thread_num].append(kssd.printMinHashes())
-            write_to_file(str(p.thread_num)+".txt", kssd.printMinHashes())
+            #simply save results
+            #write_to_file("SAVE_PATH"+str(p.thread_num)+".txt", kssd.printMinHashes())
 t2 = time.time()
 print("sketch time is :", t2-t1)
 #sketch_list = [item for sublist in sketcharr for item in sublist]
