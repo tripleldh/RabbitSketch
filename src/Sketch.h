@@ -89,10 +89,10 @@ namespace Sketch{
 			double distance(MinHash * msh);
 
 			//print hash values for debug
-			void printMinHashes();
-
+			string printMinHashes();
+			//void storeMinHashes();
 			//get hash values for saving
-			vector<uint64_t> storeMinHashes();
+			vector<uint64_t>  storeMinHashes();
 
 			//load hash valued from files
 			void loadMinHashes(vector<uint64_t> hashArr);
@@ -257,6 +257,7 @@ namespace Sketch{
 			int dim_end;
 			int hashSize;
 			int hashLimit;
+			Reference reference;
 			int component_num;
 			int comp_bittl;
 			int BaseMap[128];
@@ -430,7 +431,7 @@ namespace Sketch{
 
 		public:
 			/// OrderMinHash constructor
-			OrderMinHash(){};
+			OrderMinHash() : seq(nullptr), rcseq(nullptr), m_k(21), m_l(2), m_m(500), rc(false), mtSeed(32)  {};
 			/// OrderMinHash constructor for sketching sequences using default parameters
 			OrderMinHash(char * seqNew);
 			~OrderMinHash() {if (rcseq != NULL) delete rcseq;};
@@ -522,7 +523,7 @@ namespace Sketch{
 			HyperLogLog merge(const HyperLogLog &other) const;
 			void printSketch();
 			double distance(const HyperLogLog &h2) const {return 1.0 - jaccard_index(h2);}
-			double jaccard_index(HyperLogLog &h2); 
+			//double jaccard_index(HyperLogLog &h2); 
 			double jaccard_index(const HyperLogLog &h2) const; 
 
 		protected:
