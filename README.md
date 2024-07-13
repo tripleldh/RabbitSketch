@@ -58,7 +58,7 @@ make
 
 ```bash
 cd examples
-python pysketch #require fastx
+python pysketch.py #require fastx
 ```
 We will get the Jaccard index among large-scale genome sequences with Python API. To change the algorithm, simply modify 
 ```bash 
