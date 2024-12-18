@@ -1,5 +1,5 @@
-#ifndef Sketch_h
-#define Sketch_h
+#ifndef Sketch_H
+#define Sketch_H
 
 #include <map>
 #include <vector>
@@ -8,11 +8,10 @@
 #include <stdint.h>
 #include <float.h>
 #include <unordered_set>
-
 #include "MinHash.h"
 #include "histoSketch.h"
 #include "HyperLogLog.h"
-//#include "kssd.h"
+//#include "Kssd.h"
 
 #if defined(_MSC_VER)
 #include <BaseTsd.h>
@@ -26,9 +25,98 @@ typedef SSIZE_T ssize_t;
 #define LD_FCTR 0.6
 #define DEFAULT_CHAR_KSSD -1
 
+
+
+//typedef struct fileInfo
+//{
+//	string fileName;
+//	uint64_t fileSize;
+//} fileInfo_t;
+
+//typedef struct sketch
+//{
+//	string fileName;
+//	string seqName;
+//	string comment;
+//	int id;
+//	vector<uint32_t> hashSet;
+//	vector<uint64_t> hashSet64;
+//} sketch_t;
+
+
+//for converting Kssd sketch into RabbitKSSD sketch format
+typedef struct co_dirstat
+{
+	unsigned int shuf_id;
+	bool koc;
+	int kmerlen;
+	int dim_rd_len;
+	int comp_num;
+	int infile_num;
+	uint64_t all_ctx_ct;
+} co_dstat_t;
+
+typedef struct setResult
+{
+	int common;
+	int size0;
+	int size1;
+	double jaccard;
+} setResult_t;
+
+struct DistInfo
+{
+	string refName;
+	int common;
+	int refSize;
+	double jorc;
+	double dist;
+};
+struct cmpDistInfo
+{
+	bool operator()(DistInfo d1, DistInfo d2){
+		return d1.dist < d2.dist;
+	}
+};
 /// \brief Sketch namespace
 namespace Sketch{
+struct fileInfo_t {
+    std::string fileName;
+    uint64_t fileSize;
+};
+	struct sketch_t {
+		std::string fileName;
+		std::vector<uint32_t> hashSet;
+		std::vector<uint64_t> hashSet64;
+		int id;
+	};
 
+	struct sketchInfo_t
+	{
+		int id;
+		int half_k;
+		int half_subk;
+		int drlevel;
+		int genomeNumber;
+	};
+	struct kssd_parameter_t
+	{
+		int half_k;
+		int half_subk;
+		int drlevel;
+		int rev_add_move;
+		int half_outctx_len;
+		int * shuffled_dim;
+		int dim_start;
+		int dim_end;
+		unsigned int kmer_size;
+		int hashSize;
+		int hashLimit;
+		uint64_t domask;
+		uint64_t tupmask;
+		uint64_t undomask0;
+		uint64_t undomask1;
+	} ;
 	typedef uint64_t hash_t;
 
 	struct WMHParameters
@@ -51,7 +139,7 @@ namespace Sketch{
 		std::vector<uint32_t> counts;
 	};
 
-/// Sketching seqeunces using minhash method
+	/// Sketching seqeunces using minhash method
 	class MinHash
 	{
 
@@ -59,15 +147,15 @@ namespace Sketch{
 			/// minhash init with parameters
 			MinHash(int k = 21, int size = 1000, uint32_t seed = 42, bool rc = true):
 				kmerSize(k), sketchSize(size), seed(seed), use64(true), noncanonical(!rc)
-			{
-				minHashHeap = new MinHashHeap(use64, sketchSize);
+		{
+			minHashHeap = new MinHashHeap(use64, sketchSize);
 
-				this->kmerSpace = pow(alphabetSize, kmerSize);
+			this->kmerSpace = pow(alphabetSize, kmerSize);
 
-				this->totalLength = 0;
+			this->totalLength = 0;
 
-				this->needToList = true;
-			}
+			this->needToList = true;
+		}
 			/* for the containment of sequences(genomes).
 			 * the size of minHashHeap(as sketchSize) is proportatd with the sequence(genome) length.
 			 * addbyxxm 2021/9/18
@@ -81,7 +169,7 @@ namespace Sketch{
 
 			/// return the jaccard index
 			double jaccard(MinHash * msh);			
-			
+
 			double containJaccard(MinHash * msh);
 
 			double containDistance(MinHash * msh);
@@ -136,7 +224,7 @@ namespace Sketch{
 					return true;
 				else
 					return false;
-				
+
 			}
 
 			/// get sketch size, it should be less than max sketch size
@@ -146,7 +234,7 @@ namespace Sketch{
 				//	this->heapToList();
 				//	this->needToList = false;
 				//}
-				
+
 				return this->reference.hashesSorted.size();
 			}
 
@@ -172,109 +260,172 @@ namespace Sketch{
 			bool preserveCase = false;
 	};
 
-	struct KSSDParameters
-	{
-		int half_k;
-		int half_subk;
-		int drlevel;
-		int* shuffled_dim;
+
+	class Kssd{
+		public:	
+			//Kssd(int half_k, int half_subk, int drlevel, int* shuffled_dim, int dim_size);
+			//kssd_parameter_t initParameter(int half_k, int half_subk, int drlevel, int* shuffled_dim);
+Kssd(int half_k, int half_subk, int drlevel, std::unique_ptr<int[]>&& shuffled_dim);
+			//Kssd(int half_k, int half_subk, int drlevel, int* shuffled_dim);
+			kssd_parameter_t initParameter(int half_k, int half_subk, int drlevel, int * shuffled_dim);
+
+
+			void update(
+					const char* seq,
+					int length,
+					const kssd_parameter_t& param,
+					bool use64,
+					int kmer_size,
+					std::unordered_set<uint32_t>& hashValueSet,
+					std::unordered_set<uint64_t>& hashValueSet64
+					);
+			bool existFile(string fileName);
+			bool isFastaList(string inputList);
+			bool isFastqList(string inputList);
+			bool isFastaGZList(string inputList);
+			bool isFastqGZList(string inputList);
+
+			bool cmpSketch(sketch_t s1, sketch_t s2);
+
+			//for result accuracy testing
+			bool cmpSketchName(sketch_t s1, sketch_t s2);
+
+			bool isSketchFile(string inputFile);
+			bool sketchFastaFile(string inputFile, bool isQuery, int numThreads, kssd_parameter_t parameter, vector<sketch_t>& sketches, sketchInfo_t& info, string outputFile);
+			bool sketchFastqFile(string inputFile, bool isQuery, int numThreads, kssd_parameter_t parameter, int leastQual, int leastNumKmer, vector<sketch_t>& sketches, sketchInfo_t& info, string outputFile);
+			void saveSketches(vector<sketch_t>& sketches, sketchInfo_t& info, string outputFile);
+			void readSketches(vector<sketch_t>& sketches, sketchInfo_t& info, string inputFile);
+			void transSketches(vector<sketch_t>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
+			void printSketches(vector<sketch_t>& sketches, string outputFile);
+			void printInfos(vector<sketch_t>& sketches, string outputFile);
+			void convertSketch(vector<sketch_t>& sketches, sketchInfo_t& info, string inputDir, int numThreads);
+			void convert_from_RabbitKSSDSketch_to_KssdSketch(vector<sketch_t>& sketches, sketchInfo_t& info, string outputDir, int numThreads);
+			void index_tridist(vector<sketch_t>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
+			void tri_dist(vector<sketch_t>& sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
+			void index_dist(vector<sketch_t>& ref_sketches, sketchInfo_t& ref_info, string refSketchOut, vector<sketch_t>& query_sketches, string outputFile, int kmer_size, double maxDist, uint64_t maxNeighbor, bool isNeighbor, int isContainment, int numThreads);
+			void dist(vector<sketch_t>& ref_sketches, vector<sketch_t>& query_sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
+
+		private:
 	
-		int* shuffleN(int n, int base);
-		int* shuffle(int arr[], int length);
-		int get_hashSize(int half_k, int drlevel);
-		int hashSize;
-	
-		KSSDParameters(int half_k_=10, int half_subk_=6, int drlevel_=3):
-			half_k(half_k_), half_subk(half_subk_), drlevel(drlevel_)
-		{
-			int dim_size = 1 << 4 * half_subk;
-			shuffled_dim = (int*)malloc(sizeof(int) * dim_size);
-			shuffled_dim = shuffleN(dim_size, 0);
-			shuffled_dim = shuffle(shuffled_dim, dim_size);
-			hashSize = get_hashSize(half_k, drlevel);
-		}
-	
+			int half_k_;
+			int half_subk_;
+			int drlevel_;
+			std::unique_ptr<int[]> shuffled_dim_;
+			int dim_size_;
+			bool use64_;
+
+
+
+			static const int BaseMap[128]; 
+
+			robin_hood::unordered_map<uint32_t, int> shuffled_map;
+
 	};
 
-	class KSSD
-	{
-		public:
-			KSSD(KSSDParameters parameter)
-			{
-				for(int i = 0; i< 128; i++)
-				{
-					BaseMap[i] = DEFAULT_CHAR_KSSD;
-				}
-				BaseMap['a'] = 0;
-				BaseMap['c'] = 1;
-				BaseMap['g'] = 2;
-				BaseMap['t'] = 3;
-				BaseMap['A'] = 0;
-				BaseMap['C'] = 1;
-				BaseMap['G'] = 2;
-				BaseMap['T'] = 3;
-				shuffled_dim = parameter.shuffled_dim;
-				half_k = parameter.half_k;
-				half_subk = parameter.half_subk;
-				drlevel = parameter.drlevel;
-				hashSize = parameter.hashSize;
-	
-	
-				half_outctx_len = half_k - half_subk;
-				rev_addmove = 4 * half_k - 2;
-				kmer_size = 2 * half_k;
-				dim_start = 0;
-				dim_end = MIN_SUBCTX_DIM_SMP_SZ;
-				hashLimit = hashSize * LD_FCTR;
-				component_num = half_k - drlevel > COMPONENT_SZ ? 1LU << 4 * (half_k - drlevel - COMPONENT_SZ) : 1;
-				comp_bittl = 64 - 4 * half_k;
-				tupmask = _64MASK >> comp_bittl;
-				domask = (tupmask >> (4 * half_outctx_len)) << (2 * half_outctx_len);
-				undomask = (tupmask ^ domask) & tupmask;
-				undomask1 = undomask &	(tupmask >> ((half_k + half_subk) * 2));
-				undomask0 = undomask ^ undomask1;
-	
-			}
-	
-			void update(char* seq);
-			double jaccard(KSSD* kssd);
-			double distance(KSSD* kssd);
-			void printHashes();
-			vector<uint64_t> storeHashes();
-			void loadHashes(vector<uint64_t> hashArr);
-			int get_half_k();
-			int get_half_subk();
-			int get_drlevel();
-	
-		private:
-			int half_k;
-			int half_subk;
-			int drlevel;
-			int half_outctx_len;
-			int rev_addmove;
-			int kmer_size;
-			int dim_start;
-			int dim_end;
-			int hashSize;
-			int hashLimit;
-			int component_num;
-			int comp_bittl;
-			int BaseMap[128];
-			int* shuffled_dim;
-	
-			uint64_t tupmask;
-			uint64_t domask;
-			uint64_t undomask;
-			uint64_t undomask0;
-			uint64_t undomask1;
-	
-			vector<uint64_t> hashList;
-			unordered_set<uint64_t> hashSet;
-	
-			int get_hashSize(int half_k, int drlevel);
-			void SetToList();
-	
-	};
+	//	struct KSSDParameters
+	//	{
+	//		int half_k;
+	//		int half_subk;
+	//		int drlevel;
+	//		int* shuffled_dim;
+	//	
+	//		int* shuffleN(int n, int base);
+	//		int* shuffle(int arr[], int length);
+	//		int get_hashSize(int half_k, int drlevel);
+	//		int hashSize;
+	//	
+	//		KSSDParameters(int half_k_=10, int half_subk_=6, int drlevel_=3):
+	//			half_k(half_k_), half_subk(half_subk_), drlevel(drlevel_)
+	//		{
+	//			int dim_size = 1 << 4 * half_subk;
+	//			shuffled_dim = (int*)malloc(sizeof(int) * dim_size);
+	//			shuffled_dim = shuffleN(dim_size, 0);
+	//			shuffled_dim = shuffle(shuffled_dim, dim_size);
+	//			hashSize = get_hashSize(half_k, drlevel);
+	//		}
+	//	
+	//	};
+	//
+	//	class KSSD
+	//	{
+	//		public:
+	//			KSSD(KSSDParameters parameter)
+	//			{
+	//				for(int i = 0; i< 128; i++)
+	//				{
+	//					BaseMap[i] = DEFAULT_CHAR_KSSD;
+	//				}
+	//				BaseMap['a'] = 0;
+	//				BaseMap['c'] = 1;
+	//				BaseMap['g'] = 2;
+	//				BaseMap['t'] = 3;
+	//				BaseMap['A'] = 0;
+	//				BaseMap['C'] = 1;
+	//				BaseMap['G'] = 2;
+	//				BaseMap['T'] = 3;
+	//				shuffled_dim = parameter.shuffled_dim;
+	//				half_k = parameter.half_k;
+	//				half_subk = parameter.half_subk;
+	//				drlevel = parameter.drlevel;
+	//				hashSize = parameter.hashSize;
+	//	
+	//	
+	//				half_outctx_len = half_k - half_subk;
+	//				rev_addmove = 4 * half_k - 2;
+	//				kmer_size = 2 * half_k;
+	//				dim_start = 0;
+	//				dim_end = MIN_SUBCTX_DIM_SMP_SZ;
+	//				hashLimit = hashSize * LD_FCTR;
+	//				component_num = half_k - drlevel > COMPONENT_SZ ? 1LU << 4 * (half_k - drlevel - COMPONENT_SZ) : 1;
+	//				comp_bittl = 64 - 4 * half_k;
+	//				tupmask = _64MASK >> comp_bittl;
+	//				domask = (tupmask >> (4 * half_outctx_len)) << (2 * half_outctx_len);
+	//				undomask = (tupmask ^ domask) & tupmask;
+	//				undomask1 = undomask &	(tupmask >> ((half_k + half_subk) * 2));
+	//				undomask0 = undomask ^ undomask1;
+	//	
+	//			}
+	//	
+	//			void update(char* seq);
+	//			double jaccard(KSSD* kssd);
+	//			double distance(KSSD* kssd);
+	//			void printHashes();
+	//			vector<uint64_t> storeHashes();
+	//			void loadHashes(vector<uint64_t> hashArr);
+	//			int get_half_k();
+	//			int get_half_subk();
+	//			int get_drlevel();
+	//	
+	//		private:
+	//			int half_k;
+	//			int half_subk;
+	//			int drlevel;
+	//			int half_outctx_len;
+	//			int rev_addmove;
+	//			int kmer_size;
+	//			int dim_start;
+	//			int dim_end;
+	//			int hashSize;
+	//			int hashLimit;
+	//			Reference reference;
+	//			int component_num;
+	//			int comp_bittl;
+	//			int BaseMap[128];
+	//			int* shuffled_dim;
+	//	
+	//			uint64_t tupmask;
+	//			uint64_t domask;
+	//			uint64_t undomask;
+	//			uint64_t undomask0;
+	//			uint64_t undomask1;
+	//	
+	//			vector<uint64_t> hashList;
+	//			unordered_set<uint64_t> hashSet;
+	//	
+	//			int get_hashSize(int half_k, int drlevel);
+	//			void SetToList();
+	//	
+	//	};
 
 
 	class WMinHash{
@@ -282,64 +433,64 @@ namespace Sketch{
 			//WMinHash(int k = 21, int size = 50, int windowSize = 20, double paraDWeight = 0.0):
 			WMinHash(WMHParameters parameters, double paraDWeight = 0.0):
 				kmerSize(parameters.kmerSize), histoSketchSize(parameters.sketchSize), minimizerWindowSize(parameters.windowSize), paraDecayWeight(paraDWeight)
-			{	
-				//numBins = pow(kmerSize, alphabetSize); //need to be confirmed
-				//histoDimension = pow(kmerSize, alphabetSize); //need to be confirmed
-				numBins = pow(kmerSize, 4); //consult from HULK
-				histoDimension = numBins; //need to be confirmed
-			
-				binsArr = (double *)malloc(numBins * sizeof(double));
-				memset(binsArr, 0, numBins*sizeof(double));//init binsArr
-			
-				int g = ceil(2 / EPSILON);
-				int d = ceil(log(1 - DELTA) / log(0.5));
-				countMinSketch = (double *)malloc(d * g *sizeof(double));
-				memset(countMinSketch, 0, d*g*sizeof(double));//init countMinSketch 
+		{	
+			//numBins = pow(kmerSize, alphabetSize); //need to be confirmed
+			//histoDimension = pow(kmerSize, alphabetSize); //need to be confirmed
+			numBins = pow(kmerSize, 4); //consult from HULK
+			histoDimension = numBins; //need to be confirmed
 
-				r = parameters.r;
-				c = parameters.c;
-				b = parameters.b;
-				
+			binsArr = (double *)malloc(numBins * sizeof(double));
+			memset(binsArr, 0, numBins*sizeof(double));//init binsArr
+
+			int g = ceil(2 / EPSILON);
+			int d = ceil(log(1 - DELTA) / log(0.5));
+			countMinSketch = (double *)malloc(d * g *sizeof(double));
+			memset(countMinSketch, 0, d*g*sizeof(double));//init countMinSketch 
+
+			r = parameters.r;
+			c = parameters.c;
+			b = parameters.b;
+
 			//	//the r, c, b and getCWS need to be outClass
 			//	r = (double *)malloc(histoSketchSize * histoDimension * sizeof(double));
 			//	c = (double *)malloc(histoSketchSize * histoDimension * sizeof(double));
 			//	b = (double *)malloc(histoSketchSize * histoDimension * sizeof(double));
 			//	getCWS(r, c, b, histoSketchSize, histoDimension);
-			
-				////for getCWS test debug
+
+			////for getCWS test debug
 			//	FILE * fp;
 			//	fp = fopen("cws.txt", "w");
 			//	for(int i = 0; i < histoSketchSize*histoDimension; i++){
 			//		fprintf(fp, "%ld\t%lf\t%lf\t%lf\n", i, r[i], c[i], b[i]);
 			//	}
-			
-				histoSketches = (uint32_t *) malloc (histoSketchSize * sizeof(uint32_t));
-				histoWeight = (double *) malloc (histoSketchSize * sizeof(double));
-				for(int i = 0; i < histoSketchSize; i++){
-					histoWeight[i] = DBL_MAX;
-				}
-				//memset(histoWeight, 0, histoSketchSize * sizeof(double));
-				
-				//add the applyConceptDrift and decayWeight.
-				if(paraDecayWeight < 0.0 || paraDecayWeight > 1.0){
-					cerr << "the paraDecayWeight must between 0.0 and 1.0 " << endl;
-					exit(1);
-				}
-				else{
-					applyConceptDrift = true;
-				}
-				if(paraDecayWeight == 1.0){
-					applyConceptDrift = false;
-				}
-				decayWeight = 1.0;
-				if(applyConceptDrift){
-					decayWeight = exp(-paraDecayWeight);
-				}
-			
-				needToCompute = true;
-			
+
+			histoSketches = (uint32_t *) malloc (histoSketchSize * sizeof(uint32_t));
+			histoWeight = (double *) malloc (histoSketchSize * sizeof(double));
+			for(int i = 0; i < histoSketchSize; i++){
+				histoWeight[i] = DBL_MAX;
 			}
-			
+			//memset(histoWeight, 0, histoSketchSize * sizeof(double));
+
+			//add the applyConceptDrift and decayWeight.
+			if(paraDecayWeight < 0.0 || paraDecayWeight > 1.0){
+				cerr << "the paraDecayWeight must between 0.0 and 1.0 " << endl;
+				exit(1);
+			}
+			else{
+				applyConceptDrift = true;
+			}
+			if(paraDecayWeight == 1.0){
+				applyConceptDrift = false;
+			}
+			decayWeight = 1.0;
+			if(applyConceptDrift){
+				decayWeight = exp(-paraDecayWeight);
+			}
+
+			needToCompute = true;
+
+		}
+
 
 			~WMinHash();
 
@@ -381,7 +532,7 @@ namespace Sketch{
 			//bool isApplyComceptDrift() { return applyConceptDrift; }
 
 
-			
+
 
 		private:
 			WMHParameters parameters;
@@ -439,17 +590,17 @@ namespace Sketch{
 			OSketch getSektch(){ return sk;}
 
 			/** \rst
-			  Build a `OrderMinHash` sketch.
-			  `seqNew` is NULL pointer in default.
-			  If seqNew is NULL pointer, buildSketch() will rebuild sketh using old data.
-			  This is useful when chaning parameters and build a new sketch.
-			 \endrst
-			*/
+				Build a `OrderMinHash` sketch.
+				`seqNew` is NULL pointer in default.
+				If seqNew is NULL pointer, buildSketch() will rebuild sketh using old data.
+				This is useful when chaning parameters and build a new sketch.
+				\endrst
+				*/
 			void buildSketch(char * seqNew);
 
 			/** 
-			   Return similarity between two `OrderMinHash` sketches. In `OrderMinHash` class, there is no jaccard function provied. Because `OrderMinHash` is a proxy of edit distance instead of jaccard index.
-			*/
+				Return similarity between two `OrderMinHash` sketches. In `OrderMinHash` class, there is no jaccard function provied. Because `OrderMinHash` is a proxy of edit distance instead of jaccard index.
+				*/
 			double similarity(OrderMinHash & omh2);
 
 			/// Return distance between two `OrderMinHash` sketches
@@ -471,9 +622,9 @@ namespace Sketch{
 			void setSeed(uint64_t seedNew) { mtSeed = seedNew; }
 
 			/** 
-			  Choose whether to deal with reverse complement sequences: default false.
-			  Reverse complement is normally used in biological sequences such as DNA or protein sequences.
-			*/
+				Choose whether to deal with reverse complement sequences: default false.
+				Reverse complement is normally used in biological sequences such as DNA or protein sequences.
+				*/
 			void setReverseComplement(bool isRC){rc = isRC;}
 
 			/// Return parameter `kmerSize`.
@@ -507,14 +658,14 @@ namespace Sketch{
 			inline void compute_sketch(char * ptr, const char * seq);
 
 			double compare_sketches(const OSketch& sk1, const OSketch& sk2, 
-											  ssize_t m = -1, bool circular = false);
+					ssize_t m = -1, bool circular = false);
 			double compare_sketch_pair(const char* p1, const char* p2,
-									   unsigned m, unsigned k, unsigned l, bool circular);
+					unsigned m, unsigned k, unsigned l, bool circular);
 
 	};
-	
+
 	class HyperLogLog{
-		
+
 		public:
 			HyperLogLog(int np):core_(1uL<<np,0),np_(np),is_calculated_(0),estim_(EstimationMethod::ERTL_MLE),jestim_(JointEstimationMethod::ERTL_JOINT_MLE) {};
 			~HyperLogLog(){};
@@ -533,7 +684,7 @@ namespace Sketch{
 			EstimationMethod                        estim_;
 			JointEstimationMethod                  jestim_;
 			//HashStruct                                 hf_;
-		
+
 		private:
 			uint32_t p() const {return np_;}//verification
 			uint32_t q() const {return (sizeof(uint64_t) * CHAR_BIT) - np_;}

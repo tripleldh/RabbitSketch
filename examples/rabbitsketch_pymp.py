@@ -9,7 +9,7 @@ from dill import dumps, loads
 file_list = []
 t1 = time.time()
 manager = Manager()
-with open('1000.list', "r") as bact1000:
+with open('bacteria.list', "r") as bact1000:
     for genomefile in bact1000:
         genomefile = genomefile.strip()
         file_list.append(genomefile)

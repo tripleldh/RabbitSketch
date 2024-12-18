@@ -4,3 +4,6 @@ examples/*.o
 examples/exe_*
 examples/*.list
 examples/res_dir
+pybind11
+../pybind
+shuf_file/*

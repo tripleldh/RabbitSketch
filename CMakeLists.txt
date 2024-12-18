@@ -12,7 +12,7 @@ aux_source_directory(src DIR_SRCS)
 
 #linux only 
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -static-libstdc++ -march=native")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -march=native")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -fopenmp -march=native")
 
 #set flags for specific files
 #set_source_files_properties(src/MinHash.cpp PROPERTIES COMPILE_FLAGS -mavx2)
@@ -35,6 +35,8 @@ if (CXXAPI)
 	install(FILES "src/Sketch.h" "src/robin_hood.h" "src/MinHash.h" 
 		          "src/hash.h" "src/histoSketch.h"
 				  "src/HyperLogLog.h"
+		      "src/common.h" "src/common.cpp"    "src/hash.h" "src/OrderMinHash.h" "src/histoSketch.h"
+				 "src/kseq.h" "src/robin_hood.h" "src/HyperLogLog.h" "src/Kssd.h"  "src/Kssd.cpp" "src/shuffle.h" "src/shuffle.cpp"
 			DESTINATION include
 		   )
 	
