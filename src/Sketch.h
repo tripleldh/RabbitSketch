@@ -12,14 +12,14 @@
 #include "histoSketch.h"
 #include "HyperLogLog.h"
 //#include "Kssd.h"
-
+#include <cstdint>
 #if defined(_MSC_VER)
 #include <BaseTsd.h>
 typedef SSIZE_T ssize_t;
 #endif  
 
 #define COMPONENT_SZ 7
-#define MIN_SUBCTX_DIM_SMP_SZ 4096
+//#define MIN_SUBCTX_DIM_SMP_SZ 4096
 #define _64MASK 0xffffffffffffffffLLU
 #define CTX_SPC_USE_L 8
 #define LD_FCTR 0.6
@@ -80,10 +80,10 @@ struct cmpDistInfo
 };
 /// \brief Sketch namespace
 namespace Sketch{
-struct fileInfo_t {
-    std::string fileName;
-    uint64_t fileSize;
-};
+	struct fileInfo_t {
+		std::string fileName;
+		uint64_t fileSize;
+	};
 	struct sketch_t {
 		std::string fileName;
 		std::vector<uint32_t> hashSet;
@@ -99,24 +99,6 @@ struct fileInfo_t {
 		int drlevel;
 		int genomeNumber;
 	};
-	struct kssd_parameter_t
-	{
-		int half_k;
-		int half_subk;
-		int drlevel;
-		int rev_add_move;
-		int half_outctx_len;
-		int * shuffled_dim;
-		int dim_start;
-		int dim_end;
-		unsigned int kmer_size;
-		int hashSize;
-		int hashLimit;
-		uint64_t domask;
-		uint64_t tupmask;
-		uint64_t undomask0;
-		uint64_t undomask1;
-	} ;
 	typedef uint64_t hash_t;
 
 	struct WMHParameters
@@ -260,60 +242,158 @@ struct fileInfo_t {
 			bool preserveCase = false;
 	};
 
+	struct kssd_parameter_t {
+		int half_k;
+		int half_subk;
+		int drlevel;
+		int rev_add_move;
+		int half_outctx_len;
+		int * shuffled_dim;
+		int dim_start;
+		int dim_end;
+		unsigned int kmer_size;
+		int hashSize;
+		int hashLimit;
+		uint64_t domask;
+		uint64_t tupmask;
+		uint64_t undomask0;
+		uint64_t undomask1;
+		robin_hood::unordered_map<uint32_t, int> shuffled_map;
+		kssd_parameter_t(int half_k_, int half_subk_, int drlevel_, int * shuffled_dim_)
+			: half_k(half_k_),
+			half_subk(half_subk_),
+			drlevel(drlevel_),
+			shuffled_dim(shuffled_dim_),
+			half_outctx_len(half_k_ - half_subk_),
+			rev_add_move(4 * half_k_ - 2),
+			kmer_size(2 * half_k_),
+			dim_start(0),
+			dim_end(1 << 4 * (half_subk - drlevel)),
+			hashSize(2000), 
+			hashLimit(2000 * LD_FCTR)
+		{
+			if (half_subk_ - drlevel_ < 3) {
+				std::cerr << "Error: the half_subk - drlevel should be at least 3. Current half_subk and drlevel are: "
+					<< half_subk_ << " and " << drlevel_ << " respectively." << std::endl;
+				throw std::invalid_argument("Invalid parameters for kssd_parameter_t");
+			}
 
+			int comp_bittl = 64 - 4 * half_k;
+			tupmask = _64MASK >> comp_bittl;
+			domask = (tupmask >> (4 * half_outctx_len)) << (2 * half_outctx_len);
+			uint64_t undomask = (tupmask ^ domask) & tupmask;
+			undomask1 = undomask & (tupmask >> ((half_k + half_subk) * 2));
+			undomask0 = undomask ^ undomask1;
+			int dim_size = 1 << (4 * half_subk);
+
+			for (int t = 0; t < dim_size; t++) {
+				if (shuffled_dim[t] < (1 << (4 * (half_subk - drlevel_))) && shuffled_dim[t] >= 0) { // ensure dim_start = 0
+					shuffled_map[t] = shuffled_dim[t];
+			//		std::cout << "Inserted into shuffled_map: " << t << " -> " << shuffled_dim[t] << std::endl;
+				}
+			}
+
+		}
+	};
 	class Kssd{
-		public:	
-			//Kssd(int half_k, int half_subk, int drlevel, int* shuffled_dim, int dim_size);
-			//kssd_parameter_t initParameter(int half_k, int half_subk, int drlevel, int* shuffled_dim);
-Kssd(int half_k, int half_subk, int drlevel, std::unique_ptr<int[]>&& shuffled_dim);
-			//Kssd(int half_k, int half_subk, int drlevel, int* shuffled_dim);
-			kssd_parameter_t initParameter(int half_k, int half_subk, int drlevel, int * shuffled_dim);
+		public:
 
 
-			void update(
-					const char* seq,
-					int length,
-					const kssd_parameter_t& param,
-					bool use64,
-					int kmer_size,
-					std::unordered_set<uint32_t>& hashValueSet,
-					std::unordered_set<uint64_t>& hashValueSet64
-					);
+			//Kssd(int half_k, int half_subk, int drlevel, std::vector<int> shuffled_dim)
+			//	:params_(half_k, half_subk, drlevel, std::move(shuffled_dim)),
+			//	dim_size_(1 << (4 * half_subk)), use64_((half_k - drlevel) > 8)
+			Kssd(kssd_parameter_t params)
+				: params_(std::move(params)),
+				dim_size_(1 << (4 * params_.half_subk)),
+				use64((params_.half_k - params_.drlevel) > 8),
+				half_outctx_len(params_.half_outctx_len),
+				rev_add_move(params_.rev_add_move),
+				half_k_(params_.half_k),
+				drlevel_(params_.drlevel),
+				half_subk_(params_.half_subk),
+				kmer_size(params_.kmer_size),
+				dim_start(params_.dim_start),
+				dim_end(params_.dim_end),
+				hashSize(params_.hashSize),
+				hashLimit(params_.hashLimit),
+				tupmask(params_.tupmask),
+				domask(params_.domask),
+				undomask0(params_.undomask0),
+				undomask1(params_.undomask1),
+				//shuffled_dim_(std::make_unique<int[]>(dim_size_)),
+				shuffled_dim_(params_.shuffled_dim),
+				shuffled_map(params_.shuffled_map),
+				reference(), 
+				component_num(0) 
+					//comp_bittl(64 - 4 * params_.half_k)
+		{
+		}
+			std::string fileName;
+			vector<uint32_t> storeHashes();
+			vector<uint64_t> storeHashes64();
+			void update(const char* seq);
 			bool existFile(string fileName);
 			bool isFastaList(string inputList);
 			bool isFastqList(string inputList);
 			bool isFastaGZList(string inputList);
 			bool isFastqGZList(string inputList);
+			int id;
+			double jaccard(Kssd* kssd);
+			double distance(Kssd* kssd);
 
 			bool cmpSketch(sketch_t s1, sketch_t s2);
 
 			//for result accuracy testing
 			bool cmpSketchName(sketch_t s1, sketch_t s2);
-
+			std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(string filepath);
 			bool isSketchFile(string inputFile);
-			bool sketchFastaFile(string inputFile, bool isQuery, int numThreads, kssd_parameter_t parameter, vector<sketch_t>& sketches, sketchInfo_t& info, string outputFile);
-			bool sketchFastqFile(string inputFile, bool isQuery, int numThreads, kssd_parameter_t parameter, int leastQual, int leastNumKmer, vector<sketch_t>& sketches, sketchInfo_t& info, string outputFile);
-			void saveSketches(vector<sketch_t>& sketches, sketchInfo_t& info, string outputFile);
-			void readSketches(vector<sketch_t>& sketches, sketchInfo_t& info, string inputFile);
-			void transSketches(vector<sketch_t>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
-			void printSketches(vector<sketch_t>& sketches, string outputFile);
-			void printInfos(vector<sketch_t>& sketches, string outputFile);
-			void convertSketch(vector<sketch_t>& sketches, sketchInfo_t& info, string inputDir, int numThreads);
-			void convert_from_RabbitKSSDSketch_to_KssdSketch(vector<sketch_t>& sketches, sketchInfo_t& info, string outputDir, int numThreads);
-			void index_tridist(vector<sketch_t>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
-			void tri_dist(vector<sketch_t>& sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
-			void index_dist(vector<sketch_t>& ref_sketches, sketchInfo_t& ref_info, string refSketchOut, vector<sketch_t>& query_sketches, string outputFile, int kmer_size, double maxDist, uint64_t maxNeighbor, bool isNeighbor, int isContainment, int numThreads);
-			void dist(vector<sketch_t>& ref_sketches, vector<sketch_t>& query_sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
+			bool sketchFastaFile(string inputFile, bool isQuery, int numThreads, kssd_parameter_t parameter, vector<Kssd*>& sketches, sketchInfo_t& info, string outputFile);
+			bool sketchFastqFile(string inputFile, bool isQuery, int numThreads, kssd_parameter_t parameter, int leastQual, int leastNumKmer, vector<Kssd>& sketches, sketchInfo_t& info, string outputFile);
+			void saveSketches(vector<Kssd*>& sketches, sketchInfo_t& info, string outputFile);
+			void readSketches(vector<Kssd*>& sketches, sketchInfo_t& info, string inputFile);
+			void transSketches(vector<Kssd*>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
+			void printSketches(vector<Kssd*>& sketches, string outputFile);
+			void printInfos(vector<Kssd*>& sketches, string outputFile);
+			void convertSketch(vector<Kssd*>& sketches, sketchInfo_t& info, string inputDir, int numThreads);
+			//void convert_from_RabbitKSSDSketch_to_KssdSketch(vector<sketch_t>& sketches, sketchInfo_t& info, string outputDir, int numThreads);
+			void index_tridist(vector<Kssd*>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
+			void tri_dist(vector<Kssd*>& sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
+			//void index_dist(vector<sketch_t>& ref_sketches, sketchInfo_t& ref_info, string refSketchOut, vector<sketch_t>& query_sketches, string outputFile, int kmer_size, double maxDist, uint64_t maxNeighbor, bool isNeighbor, int isContainment, int numThreads);
+			void dist(vector<Kssd*>& ref_sketches, vector<sketch_t>& query_sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
 
 		private:
-	
+			kssd_parameter_t params_;
 			int half_k_;
 			int half_subk_;
 			int drlevel_;
 			std::unique_ptr<int[]> shuffled_dim_;
 			int dim_size_;
-			bool use64_;
+			bool use64=  (half_k_ - drlevel_) > 8;
+			int half_outctx_len;
+			int rev_add_move;
+			int kmer_size;
+			int dim_start;
+			int dim_end;
+			int hashSize;
+			int hashLimit;
+			Reference reference;
+			int component_num;
+			int comp_bittl;
 
+			uint64_t tupmask;
+			uint64_t domask;
+			uint64_t undomask;
+			uint64_t undomask0;
+			uint64_t undomask1;
+
+			std::unordered_set<uint32_t> hashSet;
+			std::unordered_set<uint64_t> hashSet64;
+			std::vector<uint64_t> hashList64;
+			std::vector<uint32_t> hashList;
+
+			int get_hashSize(int half_k, int drlevel);
+			void SetToList64();
+			void SetToList();
 
 
 			static const int BaseMap[128]; 
