@@ -1,6 +1,6 @@
 #ifndef Sketch_H
 #define Sketch_H
-
+#include "shuffle.h"
 #include <map>
 #include <vector>
 #include <string>
@@ -121,7 +121,8 @@ namespace Sketch{
 		std::vector<uint32_t> counts;
 	};
 
-	/// Sketching seqeunces using minhash method
+
+	// Sketching seqeunces using minhash method
 	class MinHash
 	{
 
@@ -341,25 +342,25 @@ namespace Sketch{
 			double jaccard(Kssd* kssd);
 			double distance(Kssd* kssd);
 
+			//std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath);
 			bool cmpSketch(sketch_t s1, sketch_t s2);
 
 			//for result accuracy testing
 			bool cmpSketchName(sketch_t s1, sketch_t s2);
-			std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(string filepath);
 			bool isSketchFile(string inputFile);
-			bool sketchFastaFile(string inputFile, bool isQuery, int numThreads, kssd_parameter_t parameter, vector<Kssd*>& sketches, sketchInfo_t& info, string outputFile);
-			bool sketchFastqFile(string inputFile, bool isQuery, int numThreads, kssd_parameter_t parameter, int leastQual, int leastNumKmer, vector<Kssd>& sketches, sketchInfo_t& info, string outputFile);
 			void saveSketches(vector<Kssd*>& sketches, sketchInfo_t& info, string outputFile);
 			void readSketches(vector<Kssd*>& sketches, sketchInfo_t& info, string inputFile);
 			void transSketches(vector<Kssd*>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
 			void printSketches(vector<Kssd*>& sketches, string outputFile);
 			void printInfos(vector<Kssd*>& sketches, string outputFile);
 			void convertSketch(vector<Kssd*>& sketches, sketchInfo_t& info, string inputDir, int numThreads);
-			//void convert_from_RabbitKSSDSketch_to_KssdSketch(vector<sketch_t>& sketches, sketchInfo_t& info, string outputDir, int numThreads);
 			void index_tridist(vector<Kssd*>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
 			void tri_dist(vector<Kssd*>& sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
-			//void index_dist(vector<sketch_t>& ref_sketches, sketchInfo_t& ref_info, string refSketchOut, vector<sketch_t>& query_sketches, string outputFile, int kmer_size, double maxDist, uint64_t maxNeighbor, bool isNeighbor, int isContainment, int numThreads);
 			void dist(vector<Kssd*>& ref_sketches, vector<sketch_t>& query_sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
+			int get_half_subk();
+			int get_drlevel();
+			int get_half_k();
+
 
 		private:
 			kssd_parameter_t params_;
@@ -817,6 +818,10 @@ namespace Sketch{
 	};
 
 
+	std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath);
+//std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file_wrapper(std::string filepath) {
+//    return read_shuffled_file(filepath);
+//}
 }//namespace sketch
 
 #endif //Sketch_h
