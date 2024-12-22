@@ -660,7 +660,12 @@ namespace Sketch{
 		return drlevel_;
 	}
 
-
+	void Kssd::loadHashes64(std::vector<uint64_t> hashArr){
+		hashList64 = hashArr;
+	}
+	void Kssd::loadHashes(std::vector<uint32_t> hashArr){
+		hashList = hashArr;
+	}
 
 	void Kssd::update(const char* seq){
 		uint64_t tuple = 0LLU, rvs_tuple = 0LLU, uni_tuple, dr_tuple, pfilter;

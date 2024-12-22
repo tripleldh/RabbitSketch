@@ -342,6 +342,8 @@ namespace Sketch{
 			double jaccard(Kssd* kssd);
 			double distance(Kssd* kssd);
 
+			void loadHashes64(vector<uint64_t> hashArr);
+			void loadHashes(vector<uint32_t> hashArr);
 			//std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath);
 			bool cmpSketch(sketch_t s1, sketch_t s2);
 
