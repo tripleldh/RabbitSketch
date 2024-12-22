@@ -3,39 +3,7 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <pybind11/array.h>
-#include <memory>
 namespace py = pybind11;
-
-
-
-namespace pybind11 { namespace detail {
-    template <> struct type_caster<std::unique_ptr<int[]>> {
-    public:
-        PYBIND11_TYPE_CASTER(std::unique_ptr<int[]>, _("unique_ptr<int[]>"));
-
-        bool load(py::handle src, bool) {
-            if (src.is_none()) return false;
-            py::array arr = py::cast<py::array>(src);
-            auto size = arr.size();
-            value = std::make_unique<int[]>(size);
-            std::memcpy(value.get(), arr.data(), size * sizeof(int));
-            return true;
-        }
-
-        static py::handle cast(const std::unique_ptr<int[]>& src, py::return_value_policy, py::handle) {
-            auto size = sizeof(src) / sizeof(int);
-            return py::array(py::buffer_info(
-                src.get(),                        /* Pointer to buffer */
-                sizeof(int),                      /* Size of one scalar */
-                py::format_descriptor<int>::format(), /* Buffer format */
-                1,                                /* Number of dimensions */
-                {size},                          /* Shape of the buffer */
-                {sizeof(int)}                    /* Strides (in bytes) */
-            ));
-        }
-    };
-}}
 
 
 
