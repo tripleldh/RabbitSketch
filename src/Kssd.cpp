@@ -574,7 +574,8 @@ namespace Sketch{
 	//	}
 
 
-	std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath){
+	//std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath){
+	std::tuple<int, int, int, int*> read_shuffled_file(std::string filepath){
 
 
 		dim_shuffle_t* shuffled_info = read_shuffle_dim(filepath);
@@ -585,9 +586,12 @@ namespace Sketch{
 		int half_k = shuffled_info->dim_shuffle_stat.k;
 		int half_subk = shuffled_info->dim_shuffle_stat.subk;
 		int drlevel = shuffled_info->dim_shuffle_stat.drlevel;
-		std::unique_ptr<int[]> shuffled_dim_ptr(new int[1 << (4 * half_subk)]);
-		std::copy(shuffled_info->shuffled_dim, shuffled_info->shuffled_dim + (1 << (4 * half_subk)), shuffled_dim_ptr.get());
-		return std::make_tuple(half_k, half_subk, drlevel, std::move(shuffled_dim_ptr));
+		//std::unique_ptr<int[]> shuffled_dim_ptr(new int[1 << (4 * half_subk)]);
+		int*  shuffled_dim_ptr = new int[1 << (4 * half_subk)];
+		std::copy(shuffled_info->shuffled_dim, shuffled_info->shuffled_dim + (1 << (4 * half_subk)), shuffled_dim_ptr);
+		//std::copy(shuffled_info->shuffled_dim, shuffled_info->shuffled_dim + (1 << (4 * half_subk)), shuffled_dim_ptr.get());
+		//return std::make_tuple(half_k, half_subk, drlevel, std::move(shuffled_dim_ptr));
+		return std::make_tuple(half_k, half_subk, drlevel, shuffled_dim_ptr);
 
 	}
 

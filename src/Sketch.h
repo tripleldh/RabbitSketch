@@ -367,7 +367,8 @@ namespace Sketch{
 			int half_k_;
 			int half_subk_;
 			int drlevel_;
-			std::unique_ptr<int[]> shuffled_dim_;
+			//std::unique_ptr<int[]> shuffled_dim_;
+			int * shuffled_dim_;
 			int dim_size_;
 			bool use64=  (half_k_ - drlevel_) > 8;
 			int half_outctx_len;
@@ -818,7 +819,8 @@ namespace Sketch{
 	};
 
 
-	std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath);
+	std::tuple<int, int, int, int*> read_shuffled_file(std::string filepath);
+	//std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath);
 //std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file_wrapper(std::string filepath) {
 //    return read_shuffled_file(filepath);
 //}

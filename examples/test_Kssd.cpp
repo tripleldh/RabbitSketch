@@ -37,7 +37,8 @@ int main() {
 	half_k = std::get<0>(result);
 	half_subk = std::get<1>(result);
 	drlevel = std::get<2>(result);
-	std::unique_ptr<int[]> shuffled_dim_ptr = std::move(std::get<3>(result));
+	int* shuffled_dim_ptr = std::get<3>(result);
+	//std::unique_ptr<int[]> shuffled_dim_ptr = std::move(std::get<3>(result));
 	if (half_k == -1) {
 		std::cerr << "Error reading shuffled file" << std::endl;
 		return -1;
@@ -47,7 +48,7 @@ int main() {
 	std::cout << "drlevel: " << drlevel << std::endl;
 
 
-	kssd_parameter_t kssdPara(half_k, half_subk, drlevel, shuffled_dim_ptr.get());
+	kssd_parameter_t kssdPara(half_k, half_subk, drlevel, shuffled_dim_ptr);
 	vector<Sketch::Kssd *> vkssd;	
 	bool isQuery = false;
 	std::ifstream fs("100.list");
