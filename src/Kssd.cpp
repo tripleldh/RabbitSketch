@@ -923,12 +923,15 @@ namespace Sketch{
 		cerr << "=====total: " << numRef << endl;
 #pragma omp parallel for num_threads(numThreads) schedule(dynamic)
 		for(size_t i = 0; i < numRef; i++){
+			string file_name = sketches[i]->fileName.c_str();
+			vector<uint32_t> sketcharr = sketches[i]->storeHashes();
+			//vector<uint64_t> sketcharr64 = sketches[i]->storeHashes64();
 			if(i % progress_bar_size == 0) cerr << "=====finish: " << i << endl;
 			int tid = omp_get_thread_num();
-			fprintf(fpIndexArr[tid], "%s\t%s\n", sketches[i]->fileName.c_str(), dist_file_list[tid].c_str());
+			fprintf(fpIndexArr[tid], "%s\t%s\n", file_name, dist_file_list[tid].c_str());
 			memset(intersectionArr[tid], 0, numRef * sizeof(int));
 			if(use64){
-				for(size_t j = 0; j < sketches[i]->storeHashes64().size(); j++){
+				for(size_t j = 0; j < sketcharr.size(); j++){
 					uint64_t hash64 = sketches[i]->storeHashes64()[j];
 					//if(!(dict[hash64/64] & (0x8000000000000000LLU >> (hash64 % 64))))	continue;
 					if(hash_map_arr.count(hash64) == 0) continue;
@@ -941,8 +944,8 @@ namespace Sketch{
 				}
 			}
 			else{
-				for(size_t j = 0; j < sketches[i]->storeHashes().size(); j++){
-					uint32_t hash = sketches[i]->storeHashes()[j];
+				for(size_t j = 0; j < sketcharr.size(); j++){
+					uint32_t hash = sketcharr[j];
 					if(sketchSizeArr[hash] == 0) continue;
 					size_t start = hash > 0 ? offset[hash-1] : 0;
 					size_t end = offset[hash];
@@ -962,7 +965,7 @@ namespace Sketch{
 					size1 = sketches[j]->storeHashes64().size();
 				}
 				else{
-					size0 = sketches[i]->storeHashes().size();
+					size0 = sketcharr.size();
 					size1 = sketches[j]->storeHashes().size();
 				}
 				if(!isContainment){
@@ -980,7 +983,7 @@ namespace Sketch{
 					else
 						mashD = (double)-1.0 / kmer_size * log((2 * jaccard)/(1.0 + jaccard));
 					if(mashD < maxDist){
-						strBuf += sketches[j]->fileName + '\t' + sketches[i]->fileName + '\t' + to_string(common) + '|' + to_string(size0) + '|' + to_string(size1) + '\t' + to_string(jaccard) + '\t' + to_string(mashD) + '\n';
+						strBuf += sketches[j]->fileName + '\t' + file_name + '\t' + to_string(common) + '|' + to_string(size0) + '|' + to_string(size1) + '\t' + to_string(jaccard) + '\t' + to_string(mashD) + '\n';
 					}
 					//fprintf(fpArr[tid], " %s\t%s\t%d|%d|%d\t%lf\t%lf\n", sketches[j].fileName.c_str(), sketches[i].fileName.c_str(), common, size0, size1, jaccard, mashD);
 				}
@@ -999,7 +1002,7 @@ namespace Sketch{
 					else
 						AafD = (double)-1.0 / kmer_size * log(containment);
 					if(AafD < maxDist)
-						strBuf += sketches[j]->fileName + '\t' + sketches[i]->fileName + '\t' + to_string(common) + '|' + to_string(size0) + '|' + to_string(size1) + '\t' + to_string(containment) + '\t' + to_string(AafD) + '\n';
+						strBuf += sketches[j]->fileName + '\t' + file_name + '\t' + to_string(common) + '|' + to_string(size0) + '|' + to_string(size1) + '\t' + to_string(containment) + '\t' + to_string(AafD) + '\n';
 					//fprintf(fpArr[tid], " %s\t%s\t%d|%d|%d\t%lf\t%lf\n", sketches[j].fileName.c_str(), sketches[i].fileName.c_str(), common, size0, size1, containment, AafD);
 				}
 			}

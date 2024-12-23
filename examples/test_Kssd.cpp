@@ -37,7 +37,7 @@ int main(int argc, char* argv[]) {
 	double thres = stod(argv[2]);
 	int numThreads = stoi(argv[3]);
 	sketchInfo_t info;
-	auto result = Sketch::read_shuffled_file("/home/user_home/zt/bioRabbitSketch/RabbitSketch/src/shuf_file/L3K10.shuf");
+	auto result = Sketch::read_shuffled_file("/home/user_home/tongz/test/RabbitSketch/src/shuf_file/L3K10.shuf");
 	half_k = std::get<0>(result);
 	half_subk = std::get<1>(result);
 	drlevel = std::get<2>(result);
@@ -143,12 +143,12 @@ int main(int argc, char* argv[]) {
 	//			delete[] shuffled_info->shuffled_dim;
 	//			delete shuffled_info;
 	Sketch::index_tridist(vkssd, info, "result.sketch", "result.sketch.dist", 20, thres, 0, numThreads);
-	return 0;
 
 
 	double t3 = get_sec();
 	cerr << "dist time is: " << t3 - t2 << endl;
 
+	return 0;
 }
 
 
