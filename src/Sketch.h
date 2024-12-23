@@ -121,7 +121,18 @@ namespace Sketch{
     std::vector<uint32_t> counts;
   };
 
+  struct MashLite {
+    std::string fileName;               
+    int id;                            
+    //std::vector<uint32_t> hashList;    
+    std::vector<uint64_t> hashList64;  
 
+    MashLite() : id(0) {}
+  };
+
+  void transMinHashes(vector<MashLite>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
+  void index_tridist_MinHash(vector<MashLite>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
+  void saveMinHashes(vector<MashLite>& sketches, sketchInfo_t& info, string outputFile);
   // Sketching seqeunces using minhash method
   class MinHash
   {
@@ -143,7 +154,15 @@ namespace Sketch{
        * the size of minHashHeap(as sketchSize) is proportatd with the sequence(genome) length.
        * addbyxxm 2021/9/18
        */
-
+      int id;
+      MashLite toLite(vector<uint64_t> hashL) const {
+        MashLite lite;
+        lite.fileName = fileName;
+        lite.id = id;
+        //lite.hashList = hashList;
+        lite.hashList64 = hashL;
+        return lite;
+      }
       /// minhash is updatable with multiple sequences
       void update(char * seq);
 
@@ -299,10 +318,10 @@ namespace Sketch{
   };
 
   struct KssdLite {
-    std::string fileName;               // 文件名
-    int id;                             // 唯一标识符
-    std::vector<uint32_t> hashList;     // 32位哈希列表
-    std::vector<uint64_t> hashList64;   // 64位哈希列表
+    std::string fileName;               
+    int id;                            
+    std::vector<uint32_t> hashList;    
+    std::vector<uint64_t> hashList64;  
 
     KssdLite() : id(0) {}
   };
@@ -849,9 +868,6 @@ namespace Sketch{
   };
 
 
-  void transMinHashes(vector<MinHash * >& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
-  void index_tridist_MinHash(vector<MinHash * >& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
-  void saveMinHashes(vector<MinHash * >& sketches, sketchInfo_t& info, string outputFile);
   std::tuple<int, int, int, int*> read_shuffled_file(std::string filepath);
   //std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath);
   //std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file_wrapper(std::string filepath) {

@@ -65,7 +65,7 @@ int main(int argc, char* argv[])
 	int process_bar_size = get_progress_bar_size(small_file_number); 
 
 	double t1 = get_sec();
-	vector<Sketch::MinHash *> vmh;
+	vector<Sketch::MashLite> vmh;
 
 	cerr << "=====total small files: " << small_file_number << endl;
 	vector<string> resFileName;
@@ -73,7 +73,8 @@ int main(int argc, char* argv[])
 #pragma omp parallel for num_threads(numThreads) schedule(dynamic)
 	for(size_t t = 0; t < small_file_number; t++)
 	{
-		gzFile fp1;
+		std::vector<uint64_t> hashList64;
+    gzFile fp1;
 		kseq_t * ks1;
 		fp1 = gzopen(fileList[t].fileName.c_str(), "r");
 		if(fp1 == NULL){
@@ -94,10 +95,12 @@ int main(int argc, char* argv[])
 
 #pragma omp critical
 		{
-			vmh.push_back(mh1);
-			resFileName.push_back(fileList[t].fileName);
+			hashList64 = mh1->storeMinHashes();
+      Sketch::MashLite lite = mh1->toLite(hashList64);
+      vmh.push_back(lite);
+			//resFileName.push_back(fileList[t].fileName);
 		}
-
+    delete mh1;
 		gzclose(fp1);
 		kseq_destroy(ks1);
 	}
@@ -163,7 +166,7 @@ int main(int argc, char* argv[])
 	double tend = get_sec();
 	std::cerr << "=============== transSketches time: " << tend - tstart << " s" << std::endl;
 
-	Sketch::index_tridist_MinHash(vmh, info, "100.sketch", "100.sketch.dist", 20, thres, 0, numThreads);
+	Sketch::index_tridist_MinHash(vmh, info, "100.sketch", "100.sketch.dist", 21, thres, 0, numThreads);
 
 
 	double t3 = get_sec();

@@ -22,7 +22,7 @@
 #endif
 
 using namespace std;
-
+using Sketch::sketchInfo_t;
 //for compile cpu dispatch
 #if defined __AVX512F__ && defined __AVX512CD__
 uint32_t u32_intersect_vector_avx512(const uint32_t *list1,  uint32_t size1, const uint32_t *list2, uint32_t size2, uint32_t size3, uint64_t *i_a, uint64_t *i_b);
@@ -396,13 +396,14 @@ bool hashLessThan(hash_u hash1, hash_u hash2, bool use64)
 namespace Sketch
 {
 
-	void saveMinHashes(vector<MinHash*>& sketches, sketchInfo_t& info, string outputFile){
-		//bool use64 = info.half_k - info.drlevel > 8 ? true : false;
+
+
+	void saveMinHashes(vector<Sketch::MashLite>& sketches, Sketch::sketchInfo_t& info, string outputFile){
+		bool use64 = info.half_k - info.drlevel > 8 ? true : false;
 		FILE * fp = fopen(outputFile.c_str(), "w+");
-		bool use64 = true;
 		int sketchNumber = sketches.size();
 		info.genomeNumber = sketchNumber;
-		//info.id = (info.half_k << 8) + (info.half_subk << 4) + info.drlevel;
+		info.id = (info.half_k << 8) + (info.half_subk << 4) + info.drlevel;
 		fwrite(&info, sizeof(Sketch::sketchInfo_t), 1, fp);
 
 		int * genomeNameSize = new int[sketchNumber];
@@ -410,8 +411,8 @@ namespace Sketch
 		//uint64_t totalNumber = 0;
 		//uint64_t totalLength = 0;
 		for(int i = 0; i < sketchNumber; i++){
-			genomeNameSize[i] = sketches[i]->fileName.length();
-			hashsize[i] = sketches[i]->storeMinHashes().size();
+			genomeNameSize[i] = sketches[i].fileName.length();
+				hashsize[i] = sketches[i].hashList64.size();
 			//totalNumber += hashsize[i];
 			//totalLength += genomeNameSize[i];
 		}
@@ -423,22 +424,17 @@ namespace Sketch
 		fwrite(genomeNameSize, sizeof(int), sketchNumber, fp);
 		fwrite(hashsize, sizeof(int), sketchNumber, fp);
 		for(int i = 0; i < sketchNumber; i++){
-			const char * namePoint = sketches[i]->fileName.c_str();
+			const char * namePoint = sketches[i].fileName.c_str();
 			fwrite(namePoint, sizeof(char), genomeNameSize[i], fp);
-			if(use64){
-				uint64_t * curPoint = sketches[i]->storeMinHashes().data();
+				uint64_t * curPoint = sketches[i].hashList64.data();
 				fwrite(curPoint, sizeof(uint64_t), hashsize[i], fp);
-			}
-			else{
-				uint64_t * curPoint = sketches[i]->storeMinHashes().data();
-				fwrite(curPoint, sizeof(uint32_t), hashsize[i], fp);
-			}
 		}
 		fclose(fp);
 		delete [] genomeNameSize;
 		delete [] hashsize;
 
 	}
+
 
 
 #if defined __AVX512F__ && defined __AVX512CD__
@@ -514,7 +510,7 @@ namespace Sketch
 
 
 
-	void transMinHashes(vector<Sketch::MinHash*>& sketches, Sketch::sketchInfo_t& info, string dictFile, string indexFile, int numThreads){
+	void transMinHashes(vector<Sketch::MashLite>& sketches, Sketch::sketchInfo_t& info, string dictFile, string indexFile, int numThreads){
 		//int half_k = info.half_k;
 		//int drlevel = info.drlevel;
 		bool use64 = true;
@@ -533,8 +529,8 @@ namespace Sketch
 		//std::map<uint64_t, vector<uint32_t>> hash_map_arr;
 		for(size_t i = 0; i < sketches.size(); i++){
 			#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
-			for(size_t j = 0; j < sketches[i]->storeMinHashes().size(); j++){
-				uint64_t cur_hash = sketches[i]->storeMinHashes()[j];
+			for(size_t j = 0; j < sketches[i].hashList64.size(); j++){
+				uint64_t cur_hash = sketches[i].hashList64[j];
 				//cerr << cur_hash << endl;
 				//dict[cur_hash/64] |= (0x8000000000000000LLU >> (cur_hash % 64));
 				#pragma omp critical
@@ -599,7 +595,7 @@ namespace Sketch
 
 
 
-	void index_tridist_MinHash(vector<MinHash*>& sketches, Sketch::sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads){
+	void index_tridist_MinHash(vector<MashLite>& sketches, Sketch::sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads){
 
 #ifdef Timer
 		double t0 = get_sec();
@@ -756,11 +752,10 @@ namespace Sketch
 		for(size_t i = 0; i < numRef; i++){
 			if(i % progress_bar_size == 0) cerr << "=====finish: " << i << endl;
 			int tid = omp_get_thread_num();
-			fprintf(fpIndexArr[tid], "%s\t%s\n", sketches[i]->fileName.c_str(), dist_file_list[tid].c_str());
+			fprintf(fpIndexArr[tid], "%s\t%s\n", sketches[i].fileName.c_str(), dist_file_list[tid].c_str());
 			memset(intersectionArr[tid], 0, numRef * sizeof(int));
-			if(use64){
-				for(size_t j = 0; j < sketches[i]->storeMinHashes().size(); j++){
-					uint64_t hash64 = sketches[i]->storeMinHashes()[j];
+				for(size_t j = 0; j < sketches[i].hashList64.size(); j++){
+					uint64_t hash64 = sketches[i].hashList64[j];
 					//if(!(dict[hash64/64] & (0x8000000000000000LLU >> (hash64 % 64))))	continue;
 					if(hash_map_arr.count(hash64) == 0) continue;
 					//for(auto x : hash_map_arr[hash64])
@@ -770,19 +765,6 @@ namespace Sketch
 						//cerr << hash64 << '\t' << cur_index << endl;
 					}
 				}
-			}
-			else{
-				for(size_t j = 0; j < sketches[i]->storeMinHashes().size(); j++){
-					uint32_t hash = sketches[i]->storeMinHashes()[j];
-					if(sketchSizeArr[hash] == 0) continue;
-					size_t start = hash > 0 ? offset[hash-1] : 0;
-					size_t end = offset[hash];
-					for(size_t k = start; k < end; k++){
-						size_t curIndex = indexArr[k];
-						intersectionArr[tid][curIndex]++;
-					}
-				}
-			}
 
 			string strBuf("");
 			for(size_t j = i+1; j < numRef; j++){
@@ -793,8 +775,8 @@ namespace Sketch
 				//			size1 = sketches[j]->storeMinHashes().size();
 				//		}
 				//		else{
-				size0 = sketches[i]->storeMinHashes().size();
-				size1 = sketches[j]->storeMinHashes().size();
+				size0 = sketches[i].hashList64.size();
+				size1 = sketches[j].hashList64.size();
 				//		}
 				if(!isContainment){
 					int denom = size0 + size1 - common;
@@ -811,7 +793,7 @@ namespace Sketch
 					else
 						mashD = (double)-1.0 / kmer_size * log((2 * jaccard)/(1.0 + jaccard));
 					if(mashD < maxDist){
-						strBuf += sketches[j]->fileName + '\t' + sketches[i]->fileName + '\t' + to_string(common) + '|' + to_string(size0) + '|' + to_string(size1) + '\t' + to_string(jaccard) + '\t' + to_string(mashD) + '\n';
+						strBuf += sketches[j].fileName + '\t' + sketches[i].fileName + '\t' + to_string(common) + '|' + to_string(size0) + '|' + to_string(size1) + '\t' + to_string(jaccard) + '\t' + to_string(mashD) + '\n';
 					}
 					//fprintf(fpArr[tid], " %s\t%s\t%d|%d|%d\t%lf\t%lf\n", sketches[j].fileName.c_str(), sketches[i].fileName.c_str(), common, size0, size1, jaccard, mashD);
 				}
@@ -830,7 +812,7 @@ namespace Sketch
 					else
 						AafD = (double)-1.0 / kmer_size * log(containment);
 					if(AafD < maxDist)
-						strBuf += sketches[j]->fileName + '\t' + sketches[i]->fileName + '\t' + to_string(common) + '|' + to_string(size0) + '|' + to_string(size1) + '\t' + to_string(containment) + '\t' + to_string(AafD) + '\n';
+						strBuf += sketches[j].fileName + '\t' + sketches[i].fileName + '\t' + to_string(common) + '|' + to_string(size0) + '|' + to_string(size1) + '\t' + to_string(containment) + '\t' + to_string(AafD) + '\n';
 					//fprintf(fpArr[tid], " %s\t%s\t%d|%d|%d\t%lf\t%lf\n", sketches[j].fileName.c_str(), sketches[i].fileName.c_str(), common, size0, size1, containment, AafD);
 				}
 			}
