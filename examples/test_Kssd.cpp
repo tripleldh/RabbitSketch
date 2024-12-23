@@ -27,11 +27,15 @@ bool cmpFile(fileInfo_t f1, fileInfo_t f2){
 	return f1.fileSize > f2.fileSize;
 }
 
-int main() {
+int main(int argc, char* argv[]) {
 	//default
 	int half_k = 10;
 	int half_subk = 6;
 	int drlevel = 3;
+			
+	string inputFile = argv[1];
+	double thres = stod(argv[2]);
+	int numThreads = stoi(argv[3]);
 	sketchInfo_t info;
 	auto result = Sketch::read_shuffled_file("/home/user_home/zt/bioRabbitSketch/RabbitSketch/src/shuf_file/L3K10.shuf");
 	half_k = std::get<0>(result);
@@ -51,10 +55,10 @@ int main() {
 	kssd_parameter_t kssdPara(half_k, half_subk, drlevel, shuffled_dim_ptr);
 	vector<Sketch::Kssd *> vkssd;	
 	bool isQuery = false;
-	std::ifstream fs("100.list");
+	std::ifstream fs(inputFile);
 	if (!fs) {
-		std::cerr << "cant open 100.list" << std::endl;
-		return -1;
+		err(errno, "cannot open the inputFile: %s\n", inputFile.c_str());
+		//return -1;
 	}
 
 	std::vector<fileInfo_t> fileList;
@@ -76,12 +80,12 @@ int main() {
 	fs.close();
 	std::sort(fileList.begin(), fileList.end(), cmpFile);
 	int small_file_number = fileList.size();
+	double t1 = get_sec();
 	int process_bar_size = get_progress_bar_size(small_file_number); 
 	std::cerr << "===== total file num :" << small_file_number << std::endl;
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
 	for (int t = 0; t < small_file_number; t++) {
 		Sketch::Kssd* kssd = new Sketch::Kssd(kssdPara);
-		Sketch::sketch_t tmpSketch;
 		kssd->fileName = fileList[t].fileName;
 		kssd->id = t;
 		//tmpSketch.fileName = fileList[t].fileName;
@@ -100,9 +104,6 @@ int main() {
 #pragma omp critical
 		{
 			vkssd.push_back(kssd);
-			if (t % process_bar_size == 0) {
-				std::cerr << "finish sketch: " << t << " genome" << std::endl;
-			}
 		}
 
 
@@ -110,7 +111,9 @@ int main() {
 		kseq_destroy(ks1);
 	}
 
-	if (!isSketchFile("100.sketch")) { 
+	double t2 = get_sec();
+	cerr << "sketch time is: " << t2 - t1 << endl;
+	if (!isSketchFile("reault.sketch")) { 
 		std::cerr << "err:cant creat file" << std::endl;
 		return -1;
 	}
@@ -121,26 +124,31 @@ int main() {
 	info.half_k = half_k;
 	info.half_subk = half_subk;
 	info.drlevel = drlevel;
-	std::string outputFile = "100.sketch";
+	std::string outputFile = "result.sketch";
 	info.id = (half_k << 8) + (half_subk << 4) + drlevel;
-	//	info.genomeNumber = sketches.size();
+	//info.genomeNumber = sketches.size();
 	std::cout << "sketch num: " << vkssd.size() << std::endl;
 
-	saveSketches(vkssd, info, "100.sketch"); 
+	saveSketches(vkssd, info, "result.sketch"); 
 	std::cerr << "save sketches to : 100.sketch" << std::endl;
 
 	if (!isQuery) {
 		double tstart = get_sec();
 		std::string dictFile = outputFile + ".dict";
 		std::string indexFile = outputFile + ".index";
-		transSketches(vkssd, info, dictFile, indexFile, 64); 
+		transSketches(vkssd, info, dictFile, indexFile, numThreads); 
 		double tend = get_sec();
 		std::cerr << "=============== transSketches time: " << tend - tstart << " s" << std::endl;
 	}
 	//			delete[] shuffled_info->shuffled_dim;
 	//			delete shuffled_info;
-	Sketch::index_tridist(vkssd, info, "100.sketch", "100.sketch.dist", 20, 1.0, 0, 64);
+	Sketch::index_tridist(vkssd, info, "result.sketch", "result.sketch.dist", 20, thres, 0, numThreads);
 	return 0;
+
+
+	double t3 = get_sec();
+	cerr << "dist time is: " << t3 - t2 << endl;
+
 }
 
 

@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <omp.h>
 #include <sstream>
+#include "common.h"
 using namespace std;
 
 typedef struct fileInfo
@@ -21,11 +22,11 @@ typedef struct fileInfo
 
 KSEQ_INIT(gzFile, gzread)
 
-  double get_sec(){
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + (double)tv.tv_usec/1000000;
-  }
+//  double get_sec(){
+//    struct timeval tv;
+//    gettimeofday(&tv, NULL);
+//    return tv.tv_sec + (double)tv.tv_usec/1000000;
+//  }
 
 
 int main(int argc, char* argv[])

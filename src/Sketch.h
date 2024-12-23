@@ -177,7 +177,7 @@ namespace Sketch{
 
 			/// return kmerSize
 			int getKmerSize() { return kmerSize; }
-
+			
 			// return alphabet size
 			//uint32_t getAlphabetSize() { return alphabetSize; }
 
@@ -186,7 +186,8 @@ namespace Sketch{
 
 			// return whether to use 64bit hash
 			//bool isUse64() { return use64; }
-
+			//save file name
+			string fileName;
 			/// return hash seed
 			uint32_t getSeed() {return seed; }
 
@@ -821,6 +822,9 @@ namespace Sketch{
 	};
 
 
+	void transMinHashes(vector<MinHash * >& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
+	void index_tridist_MinHash(vector<MinHash * >& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
+	void saveMinHashes(vector<MinHash * >& sketches, sketchInfo_t& info, string outputFile);
 	std::tuple<int, int, int, int*> read_shuffled_file(std::string filepath);
 	//std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath);
 //std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file_wrapper(std::string filepath) {

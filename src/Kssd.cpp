@@ -113,7 +113,7 @@ namespace Sketch{
 			//std::unordered_map<uint64_t, vector<uint32_t>> hash_map_arr;
 			//std::map<uint64_t, vector<uint32_t>> hash_map_arr;
 			for(size_t i = 0; i < sketches.size(); i++){
-				//#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
+				#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
 				for(size_t j = 0; j < sketches[i]->storeHashes64().size(); j++){
 					uint64_t cur_hash = sketches[i]->storeHashes64()[j];
 					//cerr << cur_hash << endl;
@@ -599,7 +599,7 @@ namespace Sketch{
 	{
 		if(hashList.empty())//first update the hashList
 		{
-			for(auto x : hashSet)
+			for(auto &x : hashSet)
 				hashList.push_back(x);
 		}
 		else//not the first update the hashList, need merge.
@@ -607,7 +607,7 @@ namespace Sketch{
 			for(int i = 0; i < hashList.size(); i++)
 				hashSet.insert(hashList[i]);
 			hashList.clear();
-			for(auto x : hashSet)
+			for(auto &x : hashSet)
 			{
 				hashList.push_back(x);
 				//cerr << x << endl;
@@ -627,7 +627,7 @@ namespace Sketch{
 	{
 		if(hashList64.empty())//first update the hashList
 		{
-			for(auto x : hashSet64)
+			for(auto &x : hashSet64)
 				hashList64.push_back(x);
 		}
 		else//not the first update the hashList, need merge.
@@ -635,7 +635,7 @@ namespace Sketch{
 			for(int i = 0; i < hashList64.size(); i++)
 				hashSet64.insert(hashList64[i]);
 			hashList64.clear();
-			for(auto x : hashSet64)
+			for(auto &x : hashSet64)
 			{
 				hashList64.push_back(x);
 				//cerr << x << endl;
