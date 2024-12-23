@@ -53,7 +53,8 @@ int main(int argc, char* argv[]) {
 
 
 	kssd_parameter_t kssdPara(half_k, half_subk, drlevel, shuffled_dim_ptr);
-	vector<Sketch::Kssd *> vkssd;	
+	vector<Sketch::KssdLite> vkssd;	
+	//std::vector<std::unique_ptr<Sketch::Kssd>> vkssd;
 	bool isQuery = false;
 	std::ifstream fs(inputFile);
 	if (!fs) {
@@ -103,9 +104,13 @@ int main(int argc, char* argv[]) {
 		}
 #pragma omp critical
 		{
-			vkssd.push_back(kssd);
+			KssdLite lite = kssd->toLite();
+			vkssd.push_back(lite);
+			delete kssd;
+		//	vkssd.push_back(std::move(kssd));
 		}
-
+		
+		//delete kssd;
 
 		gzclose(fp1);
 		kseq_destroy(ks1);
@@ -131,22 +136,22 @@ int main(int argc, char* argv[]) {
 
 	saveSketches(vkssd, info, "result.sketch"); 
 	std::cerr << "save sketches to : 100.sketch" << std::endl;
-
-	if (!isQuery) {
-		double tstart = get_sec();
-		std::string dictFile = outputFile + ".dict";
-		std::string indexFile = outputFile + ".index";
-		transSketches(vkssd, info, dictFile, indexFile, numThreads); 
-		double tend = get_sec();
-		std::cerr << "=============== transSketches time: " << tend - tstart << " s" << std::endl;
-	}
-	//			delete[] shuffled_info->shuffled_dim;
-	//			delete shuffled_info;
+//
+//	if (!isQuery) {
+	double tstart = get_sec();
+	std::string dictFile = outputFile + ".dict";
+	std::string indexFile = outputFile + ".index";
+	transSketches(vkssd, info, dictFile, indexFile, numThreads); 
+	double tend = get_sec();
+	std::cerr << "=============== transSketches time: " << tend - tstart << " s" << std::endl;
+//	}
+//	//			delete[] shuffled_info->shuffled_dim;
+//	//			delete shuffled_info;
 	Sketch::index_tridist(vkssd, info, "result.sketch", "result.sketch.dist", 20, thres, 0, numThreads);
-
-
+//
+//
 	double t3 = get_sec();
-	cerr << "dist time is: " << t3 - t2 << endl;
+	cerr << "dist time is: " << t3 - tend << endl;
 
 	return 0;
 }
