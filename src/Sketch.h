@@ -405,13 +405,10 @@ namespace Sketch{
       bool cmpSketchName(sketch_t s1, sketch_t s2);
       bool isSketchFile(string inputFile);
       //	void saveSketches(vector<Kssd*>& sketches, sketchInfo_t& info, string outputFile);
-      void saveSketches(const std::vector<std::unique_ptr<Sketch::Kssd>>& sketches, Sketch::sketchInfo_t& info, const std::string& outputFile);
       void readSketches(vector<Kssd*>& sketches, sketchInfo_t& info, string inputFile);
-      void transSketches(vector<Kssd*>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
       void printSketches(vector<Kssd*>& sketches, string outputFile);
       void printInfos(vector<Kssd*>& sketches, string outputFile);
       void convertSketch(vector<Kssd*>& sketches, sketchInfo_t& info, string inputDir, int numThreads);
-      void index_tridist(vector<Kssd*>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
       void tri_dist(vector<Kssd*>& sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
       void dist(vector<Kssd*>& ref_sketches, vector<sketch_t>& query_sketches, string outputFile, int kmer_size, double maxDist, int numThreads);
       int get_half_subk();
@@ -453,6 +450,9 @@ namespace Sketch{
 
   };
 
+      void index_tridist(vector<KssdLite>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
+      void saveSketches(vector<KssdLite>& sketches, Sketch::sketchInfo_t& info, std::string& outputFile);
+      void transSketches(vector<KssdLite>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
   //	struct KSSDParameters
   //	{
   //		int half_k;
