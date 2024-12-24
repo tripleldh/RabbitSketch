@@ -37,11 +37,11 @@ int main(int argc, char* argv[]) {
 	double thres = stod(argv[2]);
 	int numThreads = stoi(argv[3]);
 	sketchInfo_t info;
-	auto result = Sketch::read_shuffled_file("/home/user_home/tongz/test/RabbitSketch/src/shuf_file/L3K10.shuf");
-	half_k = std::get<0>(result);
-	half_subk = std::get<1>(result);
-	drlevel = std::get<2>(result);
-	int* shuffled_dim_ptr = std::get<3>(result);
+	//auto result = Sketch::read_shuffled_file("/home/user_home/tongz/test/RabbitSketch/src/shuf_file/L3K10.shuf");
+	//half_k = std::get<0>(result);
+	//half_subk = std::get<1>(result);
+	//drlevel = std::get<2>(result);
+	//int* shuffled_dim_ptr = std::get<3>(result);
 	//std::unique_ptr<int[]> shuffled_dim_ptr = std::move(std::get<3>(result));
 	if (half_k == -1) {
 		std::cerr << "Error reading shuffled file" << std::endl;
@@ -52,7 +52,7 @@ int main(int argc, char* argv[]) {
 	std::cout << "drlevel: " << drlevel << std::endl;
 
 
-	kssd_parameter_t kssdPara(half_k, half_subk, drlevel, shuffled_dim_ptr);
+	kssd_parameter_t kssdPara(half_k, half_subk, drlevel, "/home/user_home/tongz/test/RabbitSketch/src/shuf_file/L3K10.shuf");
 	vector<Sketch::KssdLite> vkssd;	
 	//std::vector<std::unique_ptr<Sketch::Kssd>> vkssd;
 	bool isQuery = false;

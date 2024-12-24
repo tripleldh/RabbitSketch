@@ -263,6 +263,7 @@ namespace Sketch{
       bool preserveCase = false;
   };
 
+  std::tuple<int, int, int, int*> read_shuffled_file(std::string filepath);
   struct kssd_parameter_t {
     int half_k;
     int half_subk;
@@ -280,18 +281,20 @@ namespace Sketch{
     uint64_t undomask0;
     uint64_t undomask1;
     robin_hood::unordered_map<uint32_t, int> shuffled_map;
-    kssd_parameter_t(int half_k_, int half_subk_, int drlevel_, int * shuffled_dim_)
-      : half_k(half_k_),
-      half_subk(half_subk_),
-      drlevel(drlevel_),
-      shuffled_dim(shuffled_dim_),
-      half_outctx_len(half_k_ - half_subk_),
-      rev_add_move(4 * half_k_ - 2),
-      kmer_size(2 * half_k_),
-      dim_start(0),
-      dim_end(1 << 4 * (half_subk - drlevel)),
-      hashSize(2000), 
-      hashLimit(2000 * LD_FCTR)
+
+    kssd_parameter_t(int half_k_, int half_subk_, int drlevel_, string shuffle_file)
+      : 
+        half_k(half_k_),
+        half_subk(half_subk_),
+        drlevel(drlevel_),
+        //shuffled_dim(shuffled_dim_),
+        half_outctx_len(half_k_ - half_subk_),
+        rev_add_move(4 * half_k_ - 2),
+        kmer_size(2 * half_k_),
+        dim_start(0),
+        dim_end(1 << 4 * (half_subk - drlevel)),
+        hashSize(2000), 
+        hashLimit(2000 * LD_FCTR)
     {
       if (half_subk_ - drlevel_ < 3) {
         std::cerr << "Error: the half_subk - drlevel should be at least 3. Current half_subk and drlevel are: "
@@ -299,6 +302,11 @@ namespace Sketch{
         throw std::invalid_argument("Invalid parameters for kssd_parameter_t");
       }
 
+      auto result = Sketch::read_shuffled_file(shuffle_file);
+      //half_k = std::get<0>(result);
+      //half_subk = std::get<1>(result);
+      //drlevel = std::get<2>(result);
+      shuffled_dim = std::get<3>(result);
       int comp_bittl = 64 - 4 * half_k;
       tupmask = _64MASK >> comp_bittl;
       domask = (tupmask >> (4 * half_outctx_len)) << (2 * half_outctx_len);
@@ -450,9 +458,9 @@ namespace Sketch{
 
   };
 
-      void index_tridist(vector<KssdLite>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
-      void saveSketches(vector<KssdLite>& sketches, Sketch::sketchInfo_t& info, std::string& outputFile);
-      void transSketches(vector<KssdLite>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
+  void index_tridist(vector<KssdLite>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads);
+  void saveSketches(vector<KssdLite>& sketches, Sketch::sketchInfo_t& info, std::string outputFile);
+  void transSketches(vector<KssdLite>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads);
   //	struct KSSDParameters
   //	{
   //		int half_k;
@@ -868,7 +876,6 @@ namespace Sketch{
   };
 
 
-  std::tuple<int, int, int, int*> read_shuffled_file(std::string filepath);
   //std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file(std::string filepath);
   //std::tuple<int, int, int, std::unique_ptr<int[]>> read_shuffled_file_wrapper(std::string filepath) {
   //    return read_shuffled_file(filepath);

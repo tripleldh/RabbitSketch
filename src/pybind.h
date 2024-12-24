@@ -9,7 +9,20 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(rabbitsketch, m) {
   m.doc() = "rabbitsketch pybind";
-  m.def("read_shuffled_file", &Sketch::read_shuffled_file, "Reads shuffled file and returns a tuple with an array");
+  m.def("save_sketches", &Sketch::saveSketches, 
+      py::arg("sketches"), py::arg("info"), py::arg("filename"),
+      "Save sketches to a file");
+
+  m.def("trans_sketches", &Sketch::transSketches, 
+      py::arg("sketches"), py::arg("info"), py::arg("dict_file"), py::arg("index_file"), py::arg("num_threads"),
+      "Transform sketches with additional parameters");
+
+  m.def("index_dict", &Sketch::index_tridist, 
+      py::arg("sketches"), py::arg("info"), py::arg("ref_sketch_out"), py::arg("output_file"), 
+      py::arg("kmer_size"), py::arg("max_dist"), py::arg("is_containment"), py::arg("num_threads"),
+      "Compute index dictionary for sketches");
+
+
   py::class_<Sketch::MinHash>(m, "MinHash")
     //.def(py::init<>())
     //.def(py::init<int>(), py::arg("k"))
@@ -81,7 +94,7 @@ PYBIND11_MODULE(rabbitsketch, m) {
     .def("distance", &Sketch::HyperLogLog::distance)
     ;
   py::class_<Sketch::kssd_parameter_t>(m, "kssd_parameter_t")
-    .def(py::init<int, int, int, int*>())
+    .def(py::init<int, int, int, string>())
     .def_readwrite("half_k", &Sketch::kssd_parameter_t::half_k)
     .def_readwrite("half_subk", &Sketch::kssd_parameter_t::half_subk)
     .def_readwrite("drlevel", &Sketch::kssd_parameter_t::drlevel)
@@ -89,18 +102,17 @@ PYBIND11_MODULE(rabbitsketch, m) {
     .def_readwrite("hash_size", &Sketch::kssd_parameter_t::hashSize);
 
 
-  py::class_<KssdLite>(m, "KssdLite")
-    .def(py::init<>())  
-    .def_readwrite("fileName", &KssdLite::fileName)
-    .def_readwrite("id", &KssdLite::id)
-    .def_readwrite("hashList", &KssdLite::hashList)
-    .def_readwrite("hashList64", &KssdLite::hashList64);
+  //py::class_<Sketch::KssdLite>(m, "KssdLite")
+  //  .def(py::init<>())  
+  //  .def_readwrite("fileName", &Sketch::KssdLite::fileName)
+  //  .def_readwrite("id", &Sketch::KssdLite::id)
+  //  .def_readwrite("hashList", &Sketch::KssdLite::hashList)
+  //  .def_readwrite("hashList64", &Sketch::KssdLite::hashList64);
 
 
 
   py::class_<Sketch::Kssd>(m, "Kssd")
     .def(py::init<Sketch::kssd_parameter_t>())
-    .def("read_shuffled_file", &Sketch::read_shuffled_file, "Reads shuffled file and returns a tuple with an array")
     .def("update", &Sketch::Kssd::update)
     .def("jaccard", &Sketch::Kssd::jaccard)
     .def("distance", &Sketch::Kssd::distance)
@@ -108,10 +120,46 @@ PYBIND11_MODULE(rabbitsketch, m) {
     .def("get_halfk", &Sketch::Kssd::get_half_k)
     .def("get_half_subk", &Sketch::Kssd::get_half_subk)
     .def("toLite", &Sketch::Kssd::toLite)
-    .def("save_sketches",&Sketch::saveSketches)
-    .def("trans_sketches",&Sketch::transSketches)
-    .def("index_dict",&Sketch::index_tridist)
-    .def("get_drlevel", &Sketch::Kssd::get_drlevel);
+    .def("get_drlevel", &Sketch::Kssd::get_drlevel)
+    .def_readwrite("fileName", &Sketch::Kssd::fileName);
+
+  py::class_<Sketch::sketchInfo_t>(m, "SketchInfo")
+    .def(py::init<>())  
+    .def_readwrite("id", &Sketch::sketchInfo_t::id)
+    .def_readwrite("half_k", &Sketch::sketchInfo_t::half_k)
+    .def_readwrite("half_subk", &Sketch::sketchInfo_t::half_subk)
+    .def_readwrite("drlevel", &Sketch::sketchInfo_t::drlevel)
+    .def_readwrite("genomeNumber", &Sketch::sketchInfo_t::genomeNumber)
+    .def("__repr__", [](const Sketch::sketchInfo_t &info) {
+        return "<SketchInfo id=" + std::to_string(info.id) +
+        ", half_k=" + std::to_string(info.half_k) +
+        ", half_subk=" + std::to_string(info.half_subk) +
+        ", drlevel=" + std::to_string(info.drlevel) +
+        ", genomeNumber=" + std::to_string(info.genomeNumber) + ">";
+        });
+
+
+
+    py::class_<Sketch::KssdLite>(m, "KssdLite")
+        .def(py::init<>())
+        .def_readwrite("fileName", &Sketch::KssdLite::fileName)
+        .def_readwrite("id", &Sketch::KssdLite::id)
+        .def_readwrite("hashList", &Sketch::KssdLite::hashList)
+        .def_readwrite("hashList64", &Sketch::KssdLite::hashList64)
+        .def("__getstate__", [](const Sketch::KssdLite &self) {
+            return py::make_tuple(self.fileName, self.id, self.hashList, self.hashList64);
+        })
+        .def("__setstate__", [](Sketch::KssdLite &self, py::tuple t) {
+            if (t.size() != 4) {
+                throw std::runtime_error("Invalid state for KssdLite");
+            }
+            new (&self) Sketch::KssdLite(); 
+            self.fileName = t[0].cast<std::string>();
+            self.id = t[1].cast<int>();
+            self.hashList = t[2].cast<std::vector<uint32_t>>();
+            self.hashList64 = t[3].cast<std::vector<uint64_t>>();
+        });
+
 
 }
 
