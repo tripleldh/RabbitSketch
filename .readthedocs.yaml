@@ -3,7 +3,7 @@ version: 2
 
 # Set the OS, Python version, and other tools you might need
 build:
-  os: Rocky Linux ubuntu-lts-latest
+  os: ubuntu-lts-latest
   tools:
     python: "3.7.3"
 
