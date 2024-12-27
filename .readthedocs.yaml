@@ -5,6 +5,3 @@ python:
  version: 3.7.3
  install:
  - requirements: docs/requirements.txt
-versions:
-  only:
-      - add_test_script
