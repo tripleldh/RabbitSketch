@@ -3,15 +3,23 @@ Installation
 
 How to install rabbitsketch.
 
-.. code-block:: bash
 
-   pip install rabbitsketch
-
-Or install from source:
+Install the C++ interface, follow these steps:
 
 .. code-block:: bash
 
-   git clone https://github.com/yourusername/rabbitsketch.git
-   cd rabbitsketch
-   pip install .
+   cd RabbitSketch
+   mkdir build
+   cd build
+   cmake -DCXXAPI=ON .. -DCMAKE_INSTALL_PREFIX=.
+   make
+   make install
+   export LD_LIBRARY_PATH=`pwd`/lib:$LD_LIBRARY_PATH
 
+
+To install the Python interface using `pip`, follow these steps:
+
+.. code-block:: bash
+
+   cd RabbitSketch
+   pip3 install . 

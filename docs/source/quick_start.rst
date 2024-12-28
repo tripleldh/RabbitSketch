@@ -1,7 +1,22 @@
 Quick Start
 ===========
 
-This section provides a quick example of how to use rabbitsketch.
+
+Test the C++ interface, follow these steps:
+
+.. code-block:: bash
+
+   cd ../examples/
+   # Default install directory: ../build/
+   make 
+You can use the following command:
+
+.. code-block:: bash
+
+   ./exe_SKETCH_ALGORITHM FILE_LIST threshold(0.05) thread_num
+
+
+This is a quick example of how to use rabbitsketch for large scale genome similarity analysis.
 
 .. code-block:: python
 
@@ -30,17 +45,12 @@ This section provides a quick example of how to use rabbitsketch.
 	        genomefile = genomefile.strip()
 	        file_list.append(genomefile)
 	print("length of file is:", len(file_list))
-	def write_to_file(file_name, content):
-	    with open(file_name, 'a', encoding='utf-8') as file:
-	        file.write(content)
 	with pymp.Parallel(THREAD_NUM) as p:
 	    for index in p.xrange(0, len(file_list)):
-	            
 	            kssd = sketch.Kssd(kssd_para)
 	            kssd.fileName = file_list[index]
 	            for name, seq, qual in fastx.Fastx(file_list[index]): 
 	                kssd.update(seq)
-	            
 	            kssd_lite = kssd.toLite()
 	            vkssd.append(kssd_lite)
 	

@@ -6,7 +6,6 @@ Welcome
 
 **rabbitsketch** is a high-performance Python extension library based on pybind11, designed for complex Sketch algorithms and data structures.
 
-Contents:
 ---------
 
 .. toctree::
