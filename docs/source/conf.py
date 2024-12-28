@@ -15,7 +15,17 @@ release = 'v0.0.3'
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
-extensions = []
+#extensions = []
+
+
+extensions = [
+    'sphinx.ext.autodoc',          # Automatically document APIs
+    'sphinx.ext.napoleon',         # Support for NumPy/Google-style docstrings
+    'sphinx.ext.viewcode',         # Add links to source code
+    'sphinx.ext.todo',             # Support for TODO directives
+    'sphinx.ext.autosummary',      # Generate summary tables for modules/classes
+    'sphinx.ext.coverage',         # Coverage checks for documentation
+]
 
 templates_path = ['_templates']
 exclude_patterns = []
