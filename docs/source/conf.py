@@ -18,6 +18,11 @@ release = 'v0.0.3'
 #extensions = []
 
 
+html_theme_options = {
+    "navigation_depth": 3,
+    }
+
+
 extensions = [
     'sphinx.ext.autodoc',          # Automatically document APIs
     'sphinx.ext.napoleon',         # Support for NumPy/Google-style docstrings
