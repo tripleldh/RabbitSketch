@@ -3,11 +3,6 @@ MinHash API
 
 The MinHash class provides a powerful sketching algorithm for estimating set similarity and distances. Below is the detailed documentation for both C++ and Python interfaces.
 
-Contents:
----------
-
-- **C++ Interface**: Methods and attributes provided for C++ development.
-- **Python Interface**: Methods and attributes exposed to Python using pybind11.
 
 C++ Interface
 -------------
@@ -95,6 +90,47 @@ The C++ interface provides direct access to the MinHash class with full control 
 
    **Returns**:
      - `bool`: `true` if the MinHash is empty, `false` otherwise.
+
+
+.. cpp:function:: void saveMinHashes(vector<MashLite>& sketches, sketchInfo_t& info, string outputFile)
+
+   Saves `MashLite` sketches to a specified file.
+
+   **Parameters**:
+     - `sketches` (*vector<MashLite>&*): A reference to the vector of `MashLite` sketches to save.
+     - `info` (*sketchInfo_t&*): Metadata associated with the sketches.
+     - `outputFile` (*string*): Path to the file where the sketches will be saved.
+
+
+.. cpp:function:: void transMinHashes(vector<MashLite>& sketches, sketchInfo_t& info, string dictFile, string indexFile, int numThreads)
+
+   Transforms `MashLite` sketches into a format suitable for the `index_dict` method.
+
+   **Parameters**:
+     - `sketches` (*vector<MashLite>&*): A reference to the vector of `MashLite` sketches to be transformed.
+     - `info` (*sketchInfo_t&*): Metadata associated with the sketches.
+     - `dictFile` (*string*): Path to the dictionary file used for transformation.
+     - `indexFile` (*string*): Path to the index file used for transformation.
+     - `numThreads` (*int*): The number of threads to use for parallel processing.
+
+
+.. cpp:function:: void index_tridist_MinHash(vector<MashLite>& sketches, sketchInfo_t& info, string refSketchOut, string outputFile, int kmer_size, double maxDist, int isContainment, int numThreads)
+
+   Computes the sketch index using the `index_dict` method.
+
+   **Parameters**:
+     - `sketches` (*vector<MashLite>&*): A reference to the vector of `MashLite` sketches.
+     - `info` (*sketchInfo_t&*): Metadata associated with the sketches.
+     - `refSketchOut` (*string*): Path to save the reference sketches.
+     - `outputFile` (*string*): Path to the output file for results.
+     - `kmer_size` (*int*): The size of the k-mers used for sketching.
+     - `maxDist` (*double*): The maximum allowed distance for comparisons.
+     - `isContainment` (*int*): Whether to use containment comparisons (1 for true, 0 for false).
+     - `numThreads` (*int*): The number of threads to use for parallel processing.
+
+
+
+
 
 ---
 
@@ -197,40 +233,4 @@ The Python interface exposes MinHash functionality via pybind11, enabling easy u
 
    **Returns**:
      - `bool`: `True` if the MinHash is empty, `False` otherwise.
-
----
-
-Examples
---------
-
-**C++ Example**:
-
-.. code-block:: cpp
-
-   #include "MinHash.h"
-
-   MinHash mh;
-   mh.update("ACGTACGT");
-   std::vector<uint64_t> hashes = mh.storeMinHashes();
-
-   MinHash other;
-   other.update("TGCA");
-
-   double jaccardIndex = mh.jaccard(&other);
-   std::cout << "Jaccard Index: " << jaccardIndex << std::endl;
-
-**Python Example**:
-
-.. code-block:: python
-
-   from rabbitsketch import MinHash
-
-   mh = MinHash(kmer=21, size=1000, seed=42)
-   mh.update("ACGTACGT")
-
-   other = MinHash(kmer=21)
-   other.update("TGCA")
-
-   jaccard_index = mh.jaccard(other)
-   print(f"Jaccard Index: {jaccard_index}")
 

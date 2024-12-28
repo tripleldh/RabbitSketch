@@ -13,8 +13,8 @@ Welcome
    :caption: Contents:
 
    installation
-   contributing
-   changelog
-   quick_start
    api_reference/index
+   quick_start
+   changelog
+   contributing
 
