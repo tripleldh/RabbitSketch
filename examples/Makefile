@@ -1,7 +1,7 @@
 INCLUDE=../build/include
 LIBS=../build/lib
 CXX=g++
-CXXFLAGS=-g -O2 -std=c++14 -fopenmp -I $(INCLUDE)
+CXXFLAGS=-g -O2 -std=c++14 -fopenmp -fPIC -I $(INCLUDE)
 
 all: exe_test_HLL exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main
 

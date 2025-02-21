@@ -12,7 +12,7 @@ aux_source_directory(src DIR_SRCS)
 
 #linux only 
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -static-libstdc++ -march=native")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -fopenmp -march=native")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -fopenmp -march=native -fPIC")
 
 #set flags for specific files
 #set_source_files_properties(src/MinHash.cpp PROPERTIES COMPILE_FLAGS -mavx2)
@@ -23,6 +23,7 @@ if (CXXAPI)
 	add_library("${PROJECT_NAME}" SHARED ${DIR_SRCS})
 	add_library("${PROJECT_NAME}_static" STATIC ${DIR_SRCS})
 	
+  
 	#set_target_properties("${PROJECT_NAME}_dynamic" PROPERTIES OUTPUT_NAME ${PROJECT_NAME})
 	#set_target_properties("${PROJECT_NAME}_static" PROPERTIES OUTPUT_NAME ${PROJECT_NAME})
 
