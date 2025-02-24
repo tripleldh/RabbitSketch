@@ -3,7 +3,7 @@
 
 #include <iostream>
 #include <string>
-
+#include <stdint.h>
 
 #define MIN_SUBCTX_DIM_SMP_SZ 256
 
