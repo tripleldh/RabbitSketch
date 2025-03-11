@@ -65,3 +65,39 @@ cd examples
 python rabbitsketch_pymp.py #require fastx
 ```
 We will get the Jaccard index among large-scale genome sequences with Python API. 
+
+## Tested Platforms and Compilation Fix
+
+We have conducted extensive deployment tests to ensure cross-platform compatibility. The following operating system versions have been successfully tested:
+
+- **Debian**: 9.11, 9.9, 10.2, 11.1, 11.3, 12.0, 12.9  
+- **Ubuntu**: 14.04, 16.04, 18.04, 22.04, 24.04  
+- **AlmaLinux**: 8.10, 9.5  
+- **Rocky Linux**: 8.6, 9.5  
+- **CentOS Stream**: 8, 9  
+- **CentOS**: 7.6, 7.9  
+- **Fedora**: 39, 40  
+
+If you encounter any compatibility issues on these or other platforms, please report them in our GitHub issues section.
+
+### **Fixing `CMake uv_spawn` Failure on Fedora 39**
+
+During our tests, we identified an issue on Fedora 39 where running `cmake` may fail.
+This issue is caused by an **incompatible or outdated `libuv`** version provided by the system. Manually compiling and installing the latest `libuv` resolves this problem.
+
+#### **Solution: Manually Compile `libuv`**
+1. Install build dependencies:
+   ```bash
+   sudo dnf install -y autoconf automake libtool gcc gcc-c++
+
+### Clone and compile the latest `libuv`
+To manually compile and install the latest `libuv`, follow these steps:
+
+```bash
+git clone https://github.com/libuv/libuv.git
+cd libuv
+sh autogen.sh
+./configure --prefix=/usr
+make -j$(nproc)
+sudo make install
+
