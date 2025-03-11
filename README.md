@@ -90,14 +90,14 @@ This issue is caused by an **incompatible or outdated `libuv`** version provided
    ```bash
    sudo dnf install -y autoconf automake libtool gcc gcc-c++
 
-### Clone and compile the latest `libuv`
-To manually compile and install the latest `libuv`, follow these steps:
+2. Clone and compile the latest `libuv`
+   To manually compile and install the latest `libuv`, follow these steps:
 
-```bash
-git clone https://github.com/libuv/libuv.git
-cd libuv
-sh autogen.sh
-./configure --prefix=/usr
-make -j$(nproc)
-sudo make install
-
+   ```bash
+   git clone https://github.com/libuv/libuv.git
+   cd libuv
+   sh autogen.sh
+   ./configure --prefix=/usr
+   make -j$(nproc)
+   sudo make install
+   
