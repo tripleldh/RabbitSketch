@@ -48,6 +48,7 @@ Python < 3.12 is required.
 **pip install:**
 ```bash
 cd RabbitSketch
+pip install pip==22.3 setuptools==65.0
 pip install -r requirement.txt
 pip install . --user
 ```
