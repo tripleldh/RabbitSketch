@@ -44,6 +44,7 @@ We will get the distance between genome1 and genome2 with different algorithm
 The current version of `fastx` (0.0.3) may fail to install on recent Python versions (e.g., Python 3.10+ or 3.12) due to an invalid `python_requires` specifier in its `setup.py` (`'>=3.5.*'` is not a valid version constraint).
 This is due to incompatibility with newer versions of pip and setuptools, which enforce stricter PEP 440 validation.
 To work around this issue, you can downgrade `pip` and `setuptools` as recommended in `requirement.txt` before installing.
+Python < 3.12 is required.
 **pip install:**
 ```bash
 cd RabbitSketch
