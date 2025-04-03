@@ -45,6 +45,7 @@ The current version of `fastx` (0.0.3) may fail to install on recent Python vers
 This is due to incompatibility with newer versions of pip and setuptools, which enforce stricter PEP 440 validation.
 To work around this issue, you can downgrade `pip` and `setuptools` as recommended in `requirement.txt` before installing.
 Python < 3.12 is required.
+
 **pip install:**
 ```bash
 cd RabbitSketch
@@ -55,10 +56,11 @@ pip install . --user
 or
 ```bash
 #python 3.9 is require in this version
+conda create -n py39_env python=3.9
+conda activate py39_env
 conda config --add channels defaults
 conda config --add channels bioconda
 conda config --add channels conda-forge
-#in your current conda_env
 conda install rabbitsketch
 ```
 
