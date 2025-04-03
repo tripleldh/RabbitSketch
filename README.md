@@ -52,6 +52,7 @@ pip install . --user
 ```
 or
 ```bash
+#python 3.9 is require in this version
 conda config --add channels defaults
 conda config --add channels bioconda
 conda config --add channels conda-forge
