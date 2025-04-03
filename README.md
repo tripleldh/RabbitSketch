@@ -39,6 +39,11 @@ We will get the distance between genome1 and genome2 with different algorithm
 
 
 ### PYTHON bind
+
+## ⚠️ Note on `fastx` Installation
+The current version of `fastx` (0.0.3) may fail to install on recent Python versions (e.g., Python 3.10+ or 3.12) due to an invalid `python_requires` specifier in its `setup.py` (`'>=3.5.*'` is not a valid version constraint).
+This is due to incompatibility with newer versions of pip and setuptools, which enforce stricter PEP 440 validation.
+To work around this issue, you can downgrade `pip` and `setuptools` as recommended in `requirement.txt` before installing.
 **pip install:**
 ```bash
 cd RabbitSketch
@@ -63,10 +68,6 @@ python rabbitsketch_pymp.py #require fastx
 ```
 We will get the Jaccard index among large-scale genome sequences with Python API. 
 
-## ⚠️ Note on `fastx` Installation
-The current version of `fastx` (0.0.3) may fail to install on recent Python versions (e.g., Python 3.10+ or 3.12) due to an invalid `python_requires` specifier in its `setup.py` (`'>=3.5.*'` is not a valid version constraint).
-This is due to incompatibility with newer versions of pip and setuptools, which enforce stricter PEP 440 validation.
-To work around this issue, you can downgrade `pip` and `setuptools` as recommended in `requirement.txt` before installing.
 
 ## Tested Platforms and Compilation Fix
 
