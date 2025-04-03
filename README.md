@@ -42,21 +42,18 @@ We will get the distance between genome1 and genome2 with different algorithm
 **pip install:**
 ```bash
 cd RabbitSketch
+pip install -r requirement.txt
 pip install . --user
 ```
 or
 ```bash
-#pypi available (not up to date)
-#pip install rabbitsketch --user
+conda config --add channels defaults
+conda config --add channels bioconda
+conda config --add channels conda-forge
+#in your current conda_env
+conda install rabbitsketch
 ```
-**cmake install**
-```bash
-cd RabbitSketch
-mkdir build
-cd build
-cmake .. #default with pybind support
-make
-```
+
 **test using bpython or python**
 
 ```bash
