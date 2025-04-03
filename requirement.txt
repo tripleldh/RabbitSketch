@@ -1,5 +1,6 @@
 #python < 3.12
-#pip install pip==22.3 setuptools==65.0 for fastx
+pip==22.3 
+setuptools==65.0
 pybind11[global]
 pymp-pypi==0.5.0
 fastx==0.0.3
