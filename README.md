@@ -54,6 +54,8 @@ pip install -r requirement.txt
 pip install . --user
 ```
 or
+
+**conda install:**
 ```bash
 #python 3.9 is require in this version
 conda create -n py39_env python=3.9
