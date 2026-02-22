@@ -423,9 +423,16 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 }
 
 
-// TODO: using SIMD to accelerate
+// Rolling-hash optimized update():
+//   - seqRevBuf_ (member vector) avoids per-call heap allocation.
+//   - Sliding-window encoding: advancing one position costs O(1) (2 shifts + 2 OR)
+//     instead of re-encoding all KMERLEN chars from scratch (was O(KMERLEN) = O(32)).
+//   - Canonical selection via uint64 compare replaces memcpy + memcmp.
+//   NOTE: hash output differs from the original memcmp-based version because the
+//         encoding order (A=0,C=1,T=2,G=3) does not match ASCII lex order (G < T),
+//         so uint64 canonical != string lex canonical.  All self-consistent sketches
+//         built with this version are mutually compatible.
  void HyperLogLog::update(char* seq) {
- 	//reverse&complenment
  	const uint64_t LENGTH = strlen(seq);
  	for(uint64_t i = 0; i < LENGTH; i++){
  		if(seq[i] > 96 && seq[i] < 123){
@@ -434,8 +441,10 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
  	}
 
 	uint32_t qq = q();
- 	char* seqRev;
- 	seqRev = new char[LENGTH];
+
+	// Reuse member buffer to avoid heap allocation on every call.
+	seqRevBuf_.resize(LENGTH);
+ 	char* seqRev = seqRevBuf_.data();
  	char table[4] = {'T','G','A','C'};
  	for ( uint64_t i = 0; i < LENGTH; i++ )
  	{
@@ -444,133 +453,58 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
  		base &= 0x03;
  		seqRev[LENGTH - i - 1] = table[base];
  	}
- 	//sequence -> kmer
- 	//fprintf(stderr, "seqRev = %s \n", seqRev);
- 	const int KMERLEN = 32;
- 	if(LENGTH < KMERLEN) return;
-	int lanes = 8;
-	//remainder
-// 	for(uint64_t i=0; i<((LENGTH-KMERLEN)/lanes)*lanes; i+=lanes) 
-//	{
-// 	//for(uint64_t i=((LENGTH-KMERLEN)/lanes)*lanes; i<LENGTH-KMERLEN; ++i) 
-// 		//char kmer[KMERLEN+1];
-// 		char kmer_fwd[KMERLEN+1];
-// 		char kmer_rev[KMERLEN+1];
-// 		memcpy(kmer_fwd, seq+i, KMERLEN);
-// 		memcpy(kmer_rev, seqRev+LENGTH-i-KMERLEN, KMERLEN);
-// 		kmer_fwd[KMERLEN] = '\0';
-// 		kmer_rev[KMERLEN] = '\0';
-//
-// 		if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
-// 			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
-// 			//addh(kmer_fwd);
-// 			//calc 64bit int hashes and count leading zero
-// 			//step1 hash to int
-// 			//step2 call int hash 
-// 			//step3 lzcnt
-// 		    //uint8_t mask = 0x06; //FIXME: not general only works for DNA sequences, it's just a trick.
-//	        uint64_t res = 0;
-//	        for(int i = 0; i < KMERLEN; i++)
-//	        {
-//		    	uint8_t meri = (uint8_t)kmer_fwd[i];
-//		    	meri &= 0x06;
-//		    	meri >>= 1;
-//		    	res |= (uint64_t)meri;
-//		    	res << 2;
-//			}
-//			uint64_t hashval = mc::murmur3_fmix(res, 42);
-//			const uint32_t index(hashval >> q());
-//			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
-//			core_[index] = std::max(core_[index], lzt);
-//#if LZ_COUNTER
-//			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
-//#endif
-//
-//			
-// 		} else {
-// 			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
-// 			//calc 64bit hashes and count leading zero
-// 			//addh(kmer_rev);
-// 			//	        
-// 			uint64_t res = 0;
-//	        for(int i = 0; i < KMERLEN; i++)
-//	        {
-//		    	uint8_t meri = (uint8_t)kmer_rev[i];
-//		    	meri &= 0x06;
-//		    	meri >>= 1;
-//		    	res |= (uint64_t)meri;
-//		    	res << 2;
-//			}
-//			uint64_t hashval = mc::murmur3_fmix(res, 42);
-//			const uint32_t index(hashval >> q());
-//			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
-//			core_[index] = std::max(core_[index], lzt);
-//#if LZ_COUNTER
-//			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
-//#endif
-// 			
-// 		}
-//		//fprintf(stderr,"calling int hashes\n");
-// 
-// 	}
-//
-//
+
+ 	const int KMERLEN = 32; // fills exactly 64 bits (2 bits/base)
+ 	if(LENGTH < (uint64_t)KMERLEN) return;
+
+	// encode_base: A=0, C=1, T=2, G=3  (bits 2:1 of ASCII / 2)
+	auto encode_base = [](char c) -> uint64_t {
+		return (uint64_t)(((uint8_t)c & 0x06u) >> 1);
+	};
+
+	// Initialize rolling encodings for the k-mer at position 0.
+	// fwd_enc: MSB holds seq[0], LSB holds seq[KMERLEN-1].
+	// rev_enc: MSB holds seqRev[LENGTH-KMERLEN], LSB holds seqRev[LENGTH-1].
+	uint64_t fwd_enc = 0, rev_enc = 0;
+	for (int k = 0; k < KMERLEN; k++) {
+		fwd_enc = (fwd_enc << 2) | encode_base(seq[k]);
+		rev_enc = (rev_enc << 2) | encode_base(seqRev[LENGTH - KMERLEN + k]);
+	}
+
 #if defined __AVX512F__  && defined __AVX512DQ__
-	//__m512i vzero   = _mm512_set1_epi64(0);
 	__m512i vconst0 = _mm512_set1_epi64(0xff51afd7ed558ccd);
 	__m512i vconst1 = _mm512_set1_epi64(0xc4ceb9fe1a85ec53);
-//	__mmask8 weight_msk = l > 0 ? 0xFF : 0x00;
-	//fprintf(stderr, "using AVX512\n");
 #endif
 #if defined __AVX512F__  && defined __AVX512CD__
 	__m512i v1 = _mm512_set1_epi64(1);
-#endif 
+#endif
 
- 	for(uint64_t i=0; i<((LENGTH-KMERLEN)/lanes)*lanes; i+=lanes) 
- 	//for(uint64_t i=0; i<LENGTH-KMERLEN; ++i) 
+	const int lanes = 8;
+	const uint64_t N = ((LENGTH - KMERLEN) / lanes) * lanes;
+
+	// Main 8-lane loop.  Rolling hash advances by 1 for each of the 8 lanes,
+	// so the inner j-loop is sequential but does only 2 shifts+ORs per k-mer.
+ 	for(uint64_t i = 0; i < N; i += lanes)
 	{
-		char kmer_fwd[8*(KMERLEN+1)];
-		char kmer_rev[8*(KMERLEN+1)];
-		const char * this_kmer;
 		uint64_t resv[8];
-		for (int j = 0; j< lanes; j++)
+		for (int j = 0; j < lanes; j++)
 		{
-			char *fwd_j = &kmer_fwd[j*(KMERLEN+1)];
-			char *rev_j = &kmer_rev[j*(KMERLEN+1)];
-			memcpy(fwd_j, seq+i+j, KMERLEN);
-			memcpy(rev_j, seqRev+LENGTH-(i+j)-KMERLEN, KMERLEN);
-			fwd_j[KMERLEN] = '\0';
-			rev_j[KMERLEN] = '\0';
+			// Canonical = uint64-min of fwd and rev encodings.
+			resv[j] = (fwd_enc <= rev_enc) ? fwd_enc : rev_enc;
 
-			if(memcmp(fwd_j, rev_j, KMERLEN) <= 0) {
-				this_kmer = fwd_j;
-			}else {
-				this_kmer = rev_j;
-			}
- 			uint64_t res = 0;
-	        for(int k = 0; k < KMERLEN; k++)
-	        {
-		    	uint8_t meri = (uint8_t)this_kmer[k];
-		    	meri &= 0x06;
-		    	meri >>= 1;
-		    	res = (res << 2) | (uint64_t)meri;
-			}
-			resv[j] = res;
+			// Roll forward by one position:
+			//   fwd: drop MSB (old seq[i+j]) via left-shift overflow, add new LSB.
+			//   rev: drop LSB (old seqRev[LENGTH-(i+j)-1]) via right-shift,
+			//        add new MSB (seqRev[LENGTH-(i+j)-KMERLEN-1]).
+			uint64_t new_f = encode_base(seq[i + j + KMERLEN]);
+			fwd_enc = (fwd_enc << 2) | new_f;
+			uint64_t new_r = encode_base(seqRev[LENGTH - (i + j) - KMERLEN - 1]);
+			rev_enc = (rev_enc >> 2) | (new_r << (uint64_t)(2 * (KMERLEN - 1)));
 		}
 
-		//int hash
-		//for (int j = i; j< i + lanes; j++)
 		uint64_t hashvalv[8];
-
-			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
-			//addh(kmer_fwd);
-		#if defined __AVX512F__ && __AVX512DQ__
-		//using AVX512
-		//__m512i va = _mm512_loadu_si512((void *)&intHash[id + 0 * 8]);
-		//__m512i vocc = _mm512_loadu_si512((void *)&occ[id + 0 * 8]);
-		//__m512i vb = _mm512_mask_add_epi64(va, weight_msk, va, vocc);
-
-		__m512i vb = _mm512_loadu_si512((void *)resv);
+		#if defined __AVX512F__ && defined __AVX512DQ__
+		__m512i vb = _mm512_loadu_si512((void*)resv);
 		__m512i vseed = _mm512_set1_epi64(42);
 		__m512i va = _mm512_xor_epi64(vb, vseed);
 		__m512i vtmp = _mm512_srli_epi64(va, 33);
@@ -582,107 +516,55 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 		vtmp = _mm512_srli_epi64(va, 33);
 		vb = _mm512_xor_epi64(va, vtmp);
 		_mm512_storeu_si512(hashvalv, vb);
-
-		#else	
-		for (int j = 0; j< lanes; j++)
+		#else
+		for (int j = 0; j < lanes; j++)
 			hashvalv[j] = mc::murmur3_fmix(resv[j], 42);
 		#endif
-		uint64_t indexv[8];
-		uint64_t lztv[8];
-		//#if 0
-		#if defined __AVX512CD__  && __AVX512F__
-		//indexv[j] = hashvalv[j] >> qq;
-		__m512i vhash = _mm512_loadu_si512((void*)hashvalv);
-		__m512i vindex = _mm512_srli_epi64(vhash, (uint8_t)qq);	
-		_mm512_storeu_si512(indexv, vindex);
 
-		//lztv[j] = clz(((hashvalv[j] << 1)|1) << (np_ - 1)) + 1;
+		uint64_t indexv[8], lztv[8];
+		#if defined __AVX512CD__ && defined __AVX512F__
+		__m512i vhash = _mm512_loadu_si512((void*)hashvalv);
+		__m512i vindex = _mm512_srli_epi64(vhash, (uint8_t)qq);
+		_mm512_storeu_si512(indexv, vindex);
 		__m512i vlzhash = _mm512_slli_epi64(vhash, 1);
 		vhash = _mm512_or_epi64(vlzhash, v1);
 		vlzhash = _mm512_slli_epi64(vhash, (uint8_t)(np_ - 1));
 		vhash = _mm512_lzcnt_epi64(vlzhash);
 		vlzhash = _mm512_add_epi64(vhash, v1);
 		_mm512_storeu_si512(lztv, vlzhash);
-
-		#else 
-
-		for (int j = 0; j< lanes; j++)
-		{
-			//const uint32_t index(hashvalv[j] >> q());
+		#else
+		for (int j = 0; j < lanes; j++) {
 			indexv[j] = hashvalv[j] >> qq;
-			//const uint8_t lzt(clz(((hashvalv[j] << 1)|1) << (np_ - 1)) + 1);
-			lztv[j] = clz(((hashvalv[j] << 1)|1) << (np_ - 1)) + 1;
- 		}
+			lztv[j] = clz(((hashvalv[j] << 1) | 1) << (np_ - 1)) + 1;
+		}
+		#endif
 
-		#endif 
-
-		for (int j = 0; j< lanes; j++)
-		{
-			//core_[uint32_t(indexv[j])] = std::max(core_[(uint32_t)(indexv[j])], (uint8_t)lztv[j]);
+		for (int j = 0; j < lanes; j++) {
 			core_[indexv[j]] = std::max(core_[indexv[j]], (uint8_t)lztv[j]);
 #if LZ_COUNTER
-			++clz_counts_[clz(((hashvalv[j] << 1)|1) << (np_ - 1)) + 1];
-			//++clz_counts_[lztv[j]];
+			++clz_counts_[clz(((hashvalv[j] << 1) | 1) << (np_ - 1)) + 1];
 #endif
-
 		}
-
 	}
 
-
-	//remainder
- 	for(uint64_t i=((LENGTH-KMERLEN)/lanes)*lanes; i<LENGTH-KMERLEN; ++i) 
- 	//for(uint64_t i=0; i<LENGTH-KMERLEN; ++i) 
+	// Remainder: continue rolling from position N (state already correct).
+ 	for(uint64_t i = N; i < LENGTH - KMERLEN; ++i)
 	{
-		char kmer_fwd[KMERLEN+1];
-		char kmer_rev[KMERLEN+1];
-		memcpy(kmer_fwd, seq+i, KMERLEN);
-		memcpy(kmer_rev, seqRev+LENGTH-i-KMERLEN, KMERLEN);
-		kmer_fwd[KMERLEN] = '\0';
-		kmer_rev[KMERLEN] = '\0';
-		if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
-			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
-			//addh(kmer_fwd);
- 			uint64_t res = 0;
-	        for(int k = 0; k < KMERLEN; k++)
-	        {
-		    	uint8_t meri = (uint8_t)kmer_fwd[k];
-		    	meri &= 0x06;
-		    	meri >>= 1;
-		    	res = (res << 2) | (uint64_t)meri;
-			}
-			uint64_t hashval = mc::murmur3_fmix(res, 42);
-			const uint32_t index(hashval >> q());
-			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
-			core_[index] = std::max(core_[index], lzt);
+		uint64_t res = (fwd_enc <= rev_enc) ? fwd_enc : rev_enc;
+		uint64_t hashval = mc::murmur3_fmix(res, 42);
+		const uint32_t index = hashval >> qq;
+		const uint8_t lzt = clz(((hashval << 1) | 1) << (np_ - 1)) + 1;
+		core_[index] = std::max(core_[index], lzt);
 #if LZ_COUNTER
-			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
+		++clz_counts_[clz(((hashval << 1) | 1) << (np_ - 1)) + 1];
 #endif
-
-		} else {
-			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
-			//addh(kmer_rev);
- 			uint64_t res = 0;
-	        for(int k = 0; k < KMERLEN; k++)
-	        {
-		    	uint8_t meri = (uint8_t)kmer_rev[k];
-		    	meri &= 0x06;
-		    	meri >>= 1;
-		    	res = (res << 2) | (uint64_t)meri;
-			}
-			uint64_t hashval = mc::murmur3_fmix(res, 42);
-			const uint32_t index(hashval >> q());
-			const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
-			core_[index] = std::max(core_[index], lzt);
-#if LZ_COUNTER
-			++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
-#endif
-
-		}
- 
+		// Roll (reads are always in-bounds; rolled value only used if i+1 < LENGTH-KMERLEN).
+		uint64_t new_f = encode_base(seq[i + KMERLEN]);
+		fwd_enc = (fwd_enc << 2) | new_f;
+		uint64_t new_r = encode_base(seqRev[LENGTH - i - KMERLEN - 1]);
+		rev_enc = (rev_enc >> 2) | (new_r << (uint64_t)(2 * (KMERLEN - 1)));
  	}
-
- 	delete [] seqRev;
+	// seqRevBuf_ is a member; no delete needed.
  }
  
 //void HyperLogLog::update(char* seq) {
