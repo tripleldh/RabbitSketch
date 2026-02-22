@@ -12,7 +12,9 @@ using namespace Sketch;
 std::array<uint32_t,64> HyperLogLog::sum_counts(const std::vector<uint8_t> &sketchInfo) const {
 	std::array<uint32_t,64> sum_count {0};//default 64
 	for(uint64_t i=0; i<sketchInfo.size(); ++i){
-		sum_count[sketchInfo[i]]++;
+		// lzt can be 1..(65-np_), so with small p value can be 64; clamp to avoid OOB
+		uint8_t b = sketchInfo[i];
+		sum_count[b >= 64 ? 63u : b]++;
 	}
 	return sum_count;
 }
@@ -533,24 +535,25 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 		uint64_t resv[8];
 		for (int j = 0; j< lanes; j++)
 		{
-			memcpy(&kmer_fwd[j*(KMERLEN+1)], seq+i+j, KMERLEN);
-			memcpy(&kmer_rev[j*(KMERLEN+1)], seqRev+LENGTH-(i+j)-KMERLEN, KMERLEN);
-			kmer_fwd[j*(KMERLEN+1) + KMERLEN] = '\0';
-			kmer_rev[j*(KMERLEN+1) + KMERLEN] = '\0';
+			char *fwd_j = &kmer_fwd[j*(KMERLEN+1)];
+			char *rev_j = &kmer_rev[j*(KMERLEN+1)];
+			memcpy(fwd_j, seq+i+j, KMERLEN);
+			memcpy(rev_j, seqRev+LENGTH-(i+j)-KMERLEN, KMERLEN);
+			fwd_j[KMERLEN] = '\0';
+			rev_j[KMERLEN] = '\0';
 
-			if(memcmp(kmer_fwd, kmer_rev, KMERLEN) <= 0) {
-				this_kmer = kmer_fwd;
+			if(memcmp(fwd_j, rev_j, KMERLEN) <= 0) {
+				this_kmer = fwd_j;
 			}else {
-				this_kmer = kmer_rev;
+				this_kmer = rev_j;
 			}
  			uint64_t res = 0;
-	        for(int i = 0; i < KMERLEN; i++)
+	        for(int k = 0; k < KMERLEN; k++)
 	        {
-		    	uint8_t meri = (uint8_t)this_kmer[i];
+		    	uint8_t meri = (uint8_t)this_kmer[k];
 		    	meri &= 0x06;
 		    	meri >>= 1;
-		    	res |= (uint64_t)meri;
-		    	res << 2;
+		    	res = (res << 2) | (uint64_t)meri;
 			}
 			resv[j] = res;
 		}
@@ -641,13 +644,12 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 			//fprintf(stderr, "kmer_fwd = %s \n", kmer_fwd);
 			//addh(kmer_fwd);
  			uint64_t res = 0;
-	        for(int i = 0; i < KMERLEN; i++)
+	        for(int k = 0; k < KMERLEN; k++)
 	        {
-		    	uint8_t meri = (uint8_t)kmer_fwd[i];
+		    	uint8_t meri = (uint8_t)kmer_fwd[k];
 		    	meri &= 0x06;
 		    	meri >>= 1;
-		    	res |= (uint64_t)meri;
-		    	res << 2;
+		    	res = (res << 2) | (uint64_t)meri;
 			}
 			uint64_t hashval = mc::murmur3_fmix(res, 42);
 			const uint32_t index(hashval >> q());
@@ -661,13 +663,12 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 			//fprintf(stderr, "kmer_rev = %s \n", kmer_rev);
 			//addh(kmer_rev);
  			uint64_t res = 0;
-	        for(int i = 0; i < KMERLEN; i++)
+	        for(int k = 0; k < KMERLEN; k++)
 	        {
-		    	uint8_t meri = (uint8_t)kmer_rev[i];
+		    	uint8_t meri = (uint8_t)kmer_rev[k];
 		    	meri &= 0x06;
 		    	meri >>= 1;
-		    	res |= (uint64_t)meri;
-		    	res << 2;
+		    	res = (res << 2) | (uint64_t)meri;
 			}
 			uint64_t hashval = mc::murmur3_fmix(res, 42);
 			const uint32_t index(hashval >> q());
@@ -800,10 +801,12 @@ double HyperLogLog::union_size(const HyperLogLog &other) const {
 double HyperLogLog::jaccard_index(const HyperLogLog &h2) const {
 	if(jestim_ == JointEstimationMethod::ERTL_JOINT_MLE) {
 		auto full_cmps = ertl_joint(*this, h2);
-		const auto ret = full_cmps[2] / (full_cmps[0] + full_cmps[1] + full_cmps[2]);
-		return ret;
+		const double denom = full_cmps[0] + full_cmps[1] + full_cmps[2];
+		if(denom <= 0.) return 0.;
+		return full_cmps[2] / denom;
 	}
 	const double us = union_size(h2);
+	if(us <= 0.) return 0.;
 	const double ret = (creport() + h2.creport() - us) / us;
 	return std::max(0., ret);
 }

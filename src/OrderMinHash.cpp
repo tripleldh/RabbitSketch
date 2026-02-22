@@ -396,13 +396,18 @@ static void omh_pos(const std::string& seq, unsigned k, unsigned l, unsigned m, 
 			pqueue.pop();
 		}
 		std::sort(lmers.begin(), lmers.end(), [&](const mer_info& x, const mer_info& y) { return x.pos < y.pos; });
-		assert(lmers.size() == l);
-
-		//	block(i, j, lmers[j].pos);
-		for(unsigned j = 0; j < l; ++j)
-		{
-			memcpy(ptr, &seq.data()[lmers[j].pos], k);
-			ptr += k;
+		// When sequence is short or has few distinct k-mers, queue may have fewer than l elements; pad by repeating last
+		const size_t ncopy = lmers.size();
+		if(ncopy == 0) {
+			memset(ptr, 0, l * k);
+			ptr += l * k;
+		} else {
+			for(unsigned j = 0; j < l; ++j)
+			{
+				size_t idx = j < ncopy ? j : (ncopy - 1);
+				memcpy(ptr, &seq.data()[lmers[idx].pos], k);
+				ptr += k;
+			}
 		}
 	}
 	//t2 = get_sec();
@@ -434,6 +439,7 @@ double OrderMinHash::compare_sketches(const OSketch& sk1, const OSketch& sk2, ss
 }
 
 double OrderMinHash::compare_sketch_pair(const char* p1, const char* p2, unsigned m, unsigned k, unsigned l, bool circular) {
+	if(m == 0) return 0.0;
 	const unsigned block = std::max(l, (unsigned)1) * k;
 	unsigned count = 0;
 	if(!circular || l < 2) {
@@ -465,8 +471,7 @@ inline uint64_t hash_to_uint(const char * kmer, int k)
 		uint8_t meri = (uint8_t)kmer[i];
 		meri &= mask;
 		meri >>= 1;
-		res |= (uint64_t)meri;
-		res <<= 2;
+		res = (res << 2) | (uint64_t)meri;
 	}
 
 	return res;
