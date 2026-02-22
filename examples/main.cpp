@@ -89,15 +89,25 @@ int main(int argc, char* argv[])
 //		}
 //	}
 
+	// Distance definitions: MinHash & KSSD use Mash distance: -log(2*J/(1+J))/k.
+	// HyperLogLog's .distance() is 1-J (Jaccard distance); we convert to Mash distance here for comparable scale.
+	// OrderMinHash measures order-sensitive (edit-distance-like) similarity, so its scale is not comparable to Jaccard/Mash.
+	const int kmerSizeForMash = parameter.kmerSize;  // same k as MinHash
 	cout << "begin to compute the WMH distance: "  << endl;
 	printf("=====================================\t WMinHash \t MinHash \t OMinHash \t HyperLog\t KSSD \n");
 	for(int i = 0; i < count; i++){
 		for(int j = i+1; j < count; j++){
 			double distance0 = vwmh[i]->distance(vwmh[j]);
-			//double distance1 = 1.0 - vmh[i]->jaccard(vmh[j]);
 			double distance1 = vmh[i]->distance(vmh[j]);
 			double distance2 = vomh[i].distance(vomh[j]);
-			double distance3 = vhlog[i].distance(vhlog[j]);
+			double jaccard_hll = vhlog[i].jaccard_index(vhlog[j]);
+			double distance3;  // Mash-style distance for HLL so it's comparable to MinHash/KSSD
+			if(jaccard_hll >= 1.0) distance3 = 0.0;
+			else if(jaccard_hll <= 0.0) distance3 = 1.0;
+			else {
+				distance3 = -log(2.0 * jaccard_hll / (1.0 + jaccard_hll)) / (double)kmerSizeForMash;
+				if(distance3 > 1.0) distance3 = 1.0;
+			}
 			double distance4 = vkssd[i]->distance(vkssd[j]);
 			printf("the distance of seq[%d] and seq[%d] is:\t %lf \t %lf \t %lf \t %lf \t %lf \n", i, j, distance0, distance1, distance2, distance3, distance4);
 		}
