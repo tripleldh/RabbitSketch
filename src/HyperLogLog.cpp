@@ -442,9 +442,12 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 
 	uint32_t qq = q();
 
-	// Reuse member buffer to avoid heap allocation on every call.
-	seqRevBuf_.resize(LENGTH);
- 	char* seqRev = seqRevBuf_.data();
+	// thread_local: one buffer per thread, reused across update() calls within
+	// the same thread.  Not stored in the sketch object, so no memory bloat when
+	// many HyperLogLog objects are kept alive simultaneously.
+	thread_local static std::vector<char> seqRevBuf;
+	seqRevBuf.resize(LENGTH);
+ 	char* seqRev = seqRevBuf.data();
  	char table[4] = {'T','G','A','C'};
  	for ( uint64_t i = 0; i < LENGTH; i++ )
  	{

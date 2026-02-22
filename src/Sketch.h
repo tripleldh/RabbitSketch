@@ -816,8 +816,6 @@ namespace Sketch{
       mutable uint8_t is_calculated_;
       EstimationMethod                        estim_;
       JointEstimationMethod                  jestim_;
-      // Reusable buffer for reverse-complement string; avoids per-call heap alloc.
-      std::vector<char> seqRevBuf_;
       //HashStruct                                 hf_;
 
     private:
