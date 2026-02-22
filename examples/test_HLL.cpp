@@ -111,6 +111,7 @@ int main(int argc, char* argv[])
 
 	cerr << "vhlog size is: " << vhlog.size() << endl;
 
+	// dist = Jaccard distance (1 - J); thres is in [0, 1]: 0 = identical, 1 = disjoint
 	#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
 	for(int i = 0; i < vhlog.size(); i++){
 		int tid = omp_get_thread_num();

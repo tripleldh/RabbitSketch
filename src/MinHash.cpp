@@ -1191,8 +1191,7 @@ namespace Sketch
 			delete [] seqRev;
 		}
 
-		//needToList = true;
-		heapToList();
+		needToList = true;
 	}
 
 	/* addbyxxm
@@ -1200,60 +1199,53 @@ namespace Sketch
 	 *		The jaccard calculation will be wrong answer if there are repeat element in the hashesSorted list.
 	 * (2)	The memory free of intermediate variables is necessary for lower memory footprint especially for large data sets and large sketchSize.
 	 * 		The imtermediate variables include: tmp HashesLists, MinHashHeap objects, tmp Sets, etc.
+	 * (3)	Sort first, then linear dedup: keeps the smallest sketchSize unique hashes, result stays sorted (no second sort needed).
 	 */
 	void MinHash::heapToList()
 	{
 		HashList & hashlist = reference.hashesSorted;
-		//hashlist.clear();
 		hashlist.setUse64(use64);
 		HashList tmpHashlist;
 		tmpHashlist.setUse64(use64);
-		minHashHeap -> toHashList(tmpHashlist);
-		//minHashHeap -> toCounts(reference.counts);
+		minHashHeap->toHashList(tmpHashlist);
+		// Append heap output; preserves data written by loadMinHashes()
 		if(use64)
 			hashlist.hashes64.insert(hashlist.hashes64.end(), tmpHashlist.hashes64.begin(), tmpHashlist.hashes64.end());
 		else
 			hashlist.hashes32.insert(hashlist.hashes32.end(), tmpHashlist.hashes32.begin(), tmpHashlist.hashes32.end());
+		// Sort first, then linear dedup: take the smallest sketchSize unique hashes
 		hashlist.sort();
 		if(use64){
-			robin_hood::unordered_set<uint64_t> mergedSet;
-			for(int i = 0; i < hashlist.size(); i++){
-				mergedSet.insert(hashlist.hashes64[i]);
-				if(mergedSet.size() >= sketchSize) break;
+			std::vector<hash64_t> out;
+			out.reserve(sketchSize);
+			for(size_t i = 0; i < hashlist.hashes64.size() && out.size() < (size_t)sketchSize; i++){
+				if(i == 0 || hashlist.hashes64[i] != hashlist.hashes64[i-1])
+					out.push_back(hashlist.hashes64[i]);
 			}
-			hashlist.clear();
-			for(auto i = mergedSet.begin(); i != mergedSet.end(); ++i){
-				hashlist.hashes64.push_back(*i);
-			}
-			//clear mergedSet and free memory
-			robin_hood::unordered_set<uint64_t>().swap(mergedSet);
-
-
+			hashlist.hashes64 = std::move(out);
 		}
 		else{
-			robin_hood::unordered_set<uint32_t> mergedSet;
-			for(int i = 0; i < hashlist.size(); i++){
-				mergedSet.insert(hashlist.hashes32[i]);
-				if(mergedSet.size() >= sketchSize) break;
+			std::vector<hash32_t> out;
+			out.reserve(sketchSize);
+			for(size_t i = 0; i < hashlist.hashes32.size() && out.size() < (size_t)sketchSize; i++){
+				if(i == 0 || hashlist.hashes32[i] != hashlist.hashes32[i-1])
+					out.push_back(hashlist.hashes32[i]);
 			}
-			hashlist.clear();
-			for(auto i = mergedSet.begin(); i != mergedSet.end(); ++i){
-				hashlist.hashes32.push_back(*i);
-			}
-			//clear mergedSet and free memory
-			robin_hood::unordered_set<uint32_t>().swap(mergedSet);
+			hashlist.hashes32 = std::move(out);
 		}
-
-		hashlist.sort();
-
-		//hashlist.resize(hashlist.size() < sketchSize ? hashlist.size() : sketchSize);
-		minHashHeap -> clear();
+		minHashHeap->clear();
 		tmpHashlist.clear();
+		needToList = false;
+	}
 
+	void MinHash::ensureHeapToListed()
+	{
+		if(needToList) heapToList();
 	}
 
 	void MinHash::printMinHashes()
 	{
+		ensureHeapToListed();
 		for(int i = 0; i < reference.hashesSorted.size(); i++){
 			if(use64)
 				cerr << "hash64 " <<  i << " " << reference.hashesSorted.at(i).hash64 << endl;
@@ -1265,6 +1257,7 @@ namespace Sketch
 
 	vector<uint64_t> MinHash::storeMinHashes()
 	{
+		ensureHeapToListed();
 		vector<uint64_t> res;
 		for(int i = 0; i < reference.hashesSorted.size(); i++){
 			if(use64)
@@ -1290,51 +1283,42 @@ namespace Sketch
 	 *			The jaccard calculation will be wrong answer if there are repeat element in the hashesSorted list.
 	 * (2)	The memory free of intermediate variables is necessary for lower memory footprint especially for large data sets and large sketchSize.
 	 * 			The imtermediate variables include: tmp HashesLists, MinHashHeap objects, tmp Sets, etc.
-	 * (3) 	The minHash for sequence(genome) containment does not support merge operation since the sketchSize is not fixed size but proportional with the sequence(genome) length. 
+	 * (3) 	The minHash for sequence(genome) containment does not support merge operation since the sketchSize is not fixed size but proportional with the sequence(genome) length.
+	 * (4)	Sort first, then linear dedup (same as heapToList).
 	 */
 	void MinHash::merge(MinHash& msh)
 	{
-		//msh.heapToList();
-		HashList & mshList = msh.reference.hashesSorted;	
+		ensureHeapToListed();
+		msh.ensureHeapToListed();
 		if(use64)
 			reference.hashesSorted.hashes64.insert(reference.hashesSorted.hashes64.end(), msh.reference.hashesSorted.hashes64.begin(), msh.reference.hashesSorted.hashes64.end());
 		else
 			reference.hashesSorted.hashes32.insert(reference.hashesSorted.hashes32.end(), msh.reference.hashesSorted.hashes32.begin(), msh.reference.hashesSorted.hashes32.end());
 		reference.hashesSorted.sort();
 		if(use64){
-			robin_hood::unordered_set<uint64_t> mergedSet;
-			for(int i = 0; i < reference.hashesSorted.hashes64.size(); i++){
-				mergedSet.insert(reference.hashesSorted.hashes64[i]);
-				if(mergedSet.size() >= sketchSize) break;
+			std::vector<hash64_t> out;
+			out.reserve(sketchSize);
+			for(size_t i = 0; i < reference.hashesSorted.hashes64.size() && out.size() < (size_t)sketchSize; i++){
+				if(i == 0 || reference.hashesSorted.hashes64[i] != reference.hashesSorted.hashes64[i-1])
+					out.push_back(reference.hashesSorted.hashes64[i]);
 			}
-			reference.hashesSorted.clear();
-			for(auto i = mergedSet.begin(); i != mergedSet.end(); ++i){
-				reference.hashesSorted.hashes64.push_back(*i);
-			}
-			//clear mergedSet and free memory
-			robin_hood::unordered_set<uint64_t>().swap(mergedSet);
+			reference.hashesSorted.hashes64 = std::move(out);
 		}
 		else{
-			robin_hood::unordered_set<uint32_t> mergedSet;
-			for(int i = 0; i < reference.hashesSorted.hashes32.size(); i++){
-				mergedSet.insert(reference.hashesSorted.hashes32[i]);
-				if(mergedSet.size() >= sketchSize) break;
+			std::vector<hash32_t> out;
+			out.reserve(sketchSize);
+			for(size_t i = 0; i < reference.hashesSorted.hashes32.size() && out.size() < (size_t)sketchSize; i++){
+				if(i == 0 || reference.hashesSorted.hashes32[i] != reference.hashesSorted.hashes32[i-1])
+					out.push_back(reference.hashesSorted.hashes32[i]);
 			}
-			reference.hashesSorted.clear();
-			for(auto i = mergedSet.begin(); i != mergedSet.end(); ++i){
-				reference.hashesSorted.hashes32.push_back(*i);
-			}
-			//clear mergedSet and free memory
-			robin_hood::unordered_set<uint32_t>().swap(mergedSet);
+			reference.hashesSorted.hashes32 = std::move(out);
 		}
-
-		reference.hashesSorted.sort();
-
-		return;	
 	}
 
 	double MinHash::containJaccard(MinHash * msh)
 	{
+		ensureHeapToListed();
+		msh->ensureHeapToListed();
 		//cerr << "use the containJaccard in minHash.cpp " << endl;
 		uint64_t i = 0;
 		uint64_t j = 0;
@@ -1407,7 +1391,8 @@ namespace Sketch
 
 	double MinHash::jaccard(MinHash * msh)
 	{
-
+		ensureHeapToListed();
+		msh->ensureHeapToListed();
 		uint64_t i = 0;
 		uint64_t j = 0;
 		uint64_t common = 0;

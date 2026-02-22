@@ -106,7 +106,8 @@ int main(int argc, char* argv[])
       //Sketch::MashLite lite = mh1->toLite(hashList64);
       //vmh.push_back(lite);
 		}
-    delete mh1;
+		// NOTE: do NOT delete mh1 here; vmh holds the pointer and it is
+		// used during the pairwise distance loop below.
 		gzclose(fp1);
 		kseq_destroy(ks1);
 	}
@@ -133,10 +134,18 @@ int main(int argc, char* argv[])
 				fp_arr.push_back(fp);
 			}
 		
-			cerr << "vmh size is: " << vmh.size() << endl;
-		
-			#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
-			for(int i = 0; i < vmh.size(); i++){
+		cerr << "vmh size is: " << vmh.size() << endl;
+
+		// Finalize all sketches single-threadedly before parallel reads.
+		// heapToList() is NOT thread-safe; calling finalize() here ensures
+		// needToList==false for every sketch so the parallel loop below only
+		// reads from hashesSorted and never calls heapToList() concurrently.
+		for(int i = 0; i < (int)vmh.size(); i++){
+			vmh[i]->finalize();
+		}
+
+		#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
+		for(int i = 0; i < (int)vmh.size(); i++){
 				int tid = omp_get_thread_num();
 				for(int j = i+1; j < vmh.size(); j++){
 					double dist = vmh[i]->distance(vmh[j]);
@@ -145,12 +154,17 @@ int main(int argc, char* argv[])
 					}
 				}
 			}
-			for(int i = 0; i < numThreads; i++){
-				fclose(fp_arr[i]);
-			}
-		
-			double t3 = get_sec();
-			cerr << "dist time is: " << t3 - t2 << endl;
+		for(int i = 0; i < numThreads; i++){
+			fclose(fp_arr[i]);
+		}
+
+		for(int i = 0; i < (int)vmh.size(); i++){
+			delete vmh[i];
+		}
+		vmh.clear();
+	
+		double t3 = get_sec();
+		cerr << "dist time is: " << t3 - t2 << endl;
 
 	//Method 2
 	//index dictionary for large scale genome similarity analysis
