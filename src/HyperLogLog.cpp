@@ -3,10 +3,38 @@
 #include "Sketch.h"
 #include "MurmurHash3.h"
 #include "hash_int.h"
-//#include "x86intrin.h"
-//#include "immintrin.h"
+#include <immintrin.h>
 
 using namespace Sketch;
+
+// ── SIMD equal-register counter ───────────────────────────────────────────────
+// Counts positions where a[i] == b[i] for arrays of n uint8_t registers.
+// Compile-time dispatch: AVX-512BW (64/cycle) → AVX2 (32/cycle) → scalar.
+static int hll_count_equal_regs(const uint8_t* __restrict__ a,
+                                 const uint8_t* __restrict__ b,
+                                 int n)
+{
+	int count = 0, i = 0;
+#if defined(__AVX512BW__)
+	for (; i + 64 <= n; i += 64) {
+		__m512i va = _mm512_loadu_si512((const void*)(a + i));
+		__m512i vb = _mm512_loadu_si512((const void*)(b + i));
+		count += (int)__builtin_popcountll(
+		    (uint64_t)_mm512_cmpeq_epi8_mask(va, vb));
+	}
+#endif
+#if defined(__AVX2__)
+	for (; i + 32 <= n; i += 32) {
+		__m256i va = _mm256_loadu_si256((const __m256i*)(a + i));
+		__m256i vb = _mm256_loadu_si256((const __m256i*)(b + i));
+		__m256i eq = _mm256_cmpeq_epi8(va, vb);
+		count += (int)__builtin_popcount((uint32_t)_mm256_movemask_epi8(eq));
+	}
+#endif
+	for (; i < n; i++)
+		count += (int)(a[i] == b[i]);
+	return count;
+}
 
 
 std::array<uint32_t,64> HyperLogLog::sum_counts(const std::vector<uint8_t> &sketchInfo) const {
@@ -23,455 +51,114 @@ std::array<uint32_t,64> HyperLogLog::sum_counts(const std::vector<uint8_t> &sket
 
 
 
-
-
-
-/* 
-template<typename T>
-inline void avx512_statistic(std::vector<uint32_t> &sketch1, std::vector<uint32_t> &sketch2, T &c1l, T &c1g, T &c2l, T &c2g, T &ceq){
-	//SIMD 
-	//buffer
-	uint32_t * CBuffer;
-	CBuffer = _mm_malloc(16*64*5*sizeof(uint32_t), 32);//512
-
-	uint32_t * c1lBuffer = _mm_malloc(16*64*sizeof(uint32_t), 32); //CBuffer;
-	uint32_t * c1gBuffer = _mm_malloc(16*64*sizeof(uint32_t), 32); //CBuffer+16*64;
-	uint32_t * c2lBuffer = _mm_malloc(16*64*sizeof(uint32_t), 32); //CBuffer+16*64*2;
-	uint32_t * c2gBuffer = _mm_malloc(16*64*sizeof(uint32_t), 32); //CBuffer+16*64*3;
-	uint32_t * ceqBuffer = _mm_malloc(16*64*sizeof(uint32_t), 32); //CBuffer+16*64*4;
-
-	for(int i=0; i<64; ++i){
-		for(int j=0; j<16; ++j){
-			c1lBuffer[j*64+i] = 0;	
-			c1gBuffer[j*64+i] = 0;	
-			c2lBuffer[j*64+i] = 0;	
-			c2gBuffer[j*64+i] = 0;	
-			ceqBuffer[j*64+i] = 0;	
-		}
-
-		//fprintf(stdout,"%ld, ", c1[i]);
-	}
-
-	__m512i v_epi32_1 = _mm512_set1_epi32(1);
-	__m512i v_def_val = _mm512_set1_epi32(63);
-	__m512i v_scale = _mm512_set_epi32(64*15, 64*14, 64*13, 64*12,
-			64*11, 64*10, 64*9, 64*8,
-			64*7, 64*6, 64*5, 64*4,
-			64*3, 64*2, 64, 0);
-
-	for(uint64_t i=0; i<sketch1.size(); i+=16) {
-		//load
-		//__m512i v_sketch1 = _mm512_loadu_epi32(&sketch1[i]); // icpc AVX512F
-		//__m512i v_sketch2 = _mm512_loadu_epi32(&sketch2[i]);
-		__m512i v_sketch1 = _mm512_load_epi32(&sketch1[i]); //g++ AVX512F
-		__m512i v_sketch2 = _mm512_load_epi32(&sketch2[i]);
-		__m512i v_index1 = _mm512_add_epi32(v_sketch1, v_scale);
-		__m512i v_index2 = _mm512_add_epi32(v_sketch2, v_scale);
-
-		//compare
-		__mmask16 v_msk_lt = _mm512_cmplt_epi32_mask(v_sketch1, v_sketch2);
-		//gather //AVX512F
-		__m512i v_c1l = _mm512_mask_i32gather_epi32(v_def_val, v_msk_lt, v_index1, c1lBuffer, 4);
-		__m512i v_c2g = _mm512_mask_i32gather_epi32(v_def_val, v_msk_lt, v_index2, c2gBuffer, 4);
-		//add
-		v_c1l = _mm512_maskz_add_epi32(v_msk_lt, v_c1l, v_epi32_1);
-		v_c2g = _mm512_maskz_add_epi32(v_msk_lt, v_c2g, v_epi32_1);
-		//fprintf(stdout, " test: %ld,", _mm512_reduce_add_epi32(v_c1l));
-		//scatter  //AVX512F 
-		_mm512_mask_i32scatter_epi32(c1lBuffer, v_msk_lt, v_index1, v_c1l, 4);
-		_mm512_mask_i32scatter_epi32(c2gBuffer, v_msk_lt, v_index2, v_c2g, 4);
-
-		//compare
-		__mmask16 v_msk_gt = _mm512_cmpgt_epi32_mask(v_sketch1, v_sketch2);
-		//gather
-		__m512i v_c1g = _mm512_mask_i32gather_epi32(v_def_val, v_msk_gt, v_index1, c1gBuffer, 4);
-		__m512i v_c2l = _mm512_mask_i32gather_epi32(v_def_val, v_msk_gt, v_index2, c2lBuffer, 4);
-		//add
-		v_c1g = _mm512_maskz_add_epi32(v_msk_gt, v_c1g, v_epi32_1);
-		v_c2l = _mm512_maskz_add_epi32(v_msk_gt, v_c2l, v_epi32_1);
-		//scatter
-		_mm512_mask_i32scatter_epi32(c1gBuffer, v_msk_gt, v_index1, v_c1g, 4);
-		_mm512_mask_i32scatter_epi32(c2lBuffer, v_msk_gt, v_index2, v_c2l, 4);
-
-		//compare
-		__mmask16 v_msk_eq = _mm512_cmpeq_epi32_mask(v_sketch1, v_sketch2);
-		//gather
-		__m512i v_ceq = _mm512_mask_i32gather_epi32(v_def_val, v_msk_eq, v_index1, ceqBuffer, 4);
-		//add
-		v_ceq = _mm512_maskz_add_epi32(v_msk_eq, v_ceq, v_epi32_1);
-		//scatter
-		_mm512_mask_i32scatter_epi32(ceqBuffer, v_msk_eq, v_index1, v_ceq, 4);
-
-	}
-	//merge
-
-	//for(int i=0; i<64; ++i){
-	//	for(int j=0; j<16; ++j){
-	//		c1l[i] = c1l[i] + c1lBuffer[j*64+i];	
-	//		c1g[i] = c1g[i] + c1gBuffer[j*64+i];	
-	//		c2l[i] = c2l[i] + c2lBuffer[j*64+i];	
-	//		c2g[i] = c2g[i] + c2gBuffer[j*64+i];	
-	//		ceq[i] = ceq[i] + ceqBuffer[j*64+i];	
-	//	}
-
-	//	fprintf(stdout,"%ld, ", c1[i]);
-	//}
-
-	for (int j=0; j<64; j+=16){
-		__m512i v_merge = _mm512_set1_epi32(0);
-		for (int i=0; i<16; ++i){
-			//__m512i v_temp = _mm512_loadu_epi32(c1lBuffer+i*64+j);
-			__m512i v_temp = _mm512_load_epi32(c1lBuffer+i*64+j);
-			v_merge = _mm512_add_epi32(v_merge, v_temp);
-		}
-		//_mm512_storeu_epi32(c1l.data()+j, v_merge);
-		_mm512_store_epi32(c1l.data()+j, v_merge);
-	}
-	for (int j=0; j<64; j+=16){
-		__m512i v_merge = _mm512_set1_epi32(0);
-		for (int i=0; i<16; ++i){
-			//__m512i v_temp = _mm512_loadu_epi32(c1gBuffer+i*64+j);
-			__m512i v_temp = _mm512_load_epi32(c1gBuffer+i*64+j);
-			v_merge = _mm512_add_epi32(v_merge, v_temp);
-		}
-		//_mm512_storeu_epi32(c1g.data()+j, v_merge);
-		_mm512_store_epi32(c1g.data()+j, v_merge);
-	}
-	for (int j=0; j<64; j+=16){
-		__m512i v_merge = _mm512_set1_epi32(0);
-		for (int i=0; i<16; ++i){
-			//__m512i v_temp = _mm512_loadu_epi32(c2lBuffer+i*64+j);
-			__m512i v_temp = _mm512_load_epi32(c2lBuffer+i*64+j);
-			v_merge = _mm512_add_epi32(v_merge, v_temp);
-		}
-		//_mm512_storeu_epi32(c2l.data()+j, v_merge);
-		_mm512_store_epi32(c2l.data()+j, v_merge);
-	}
-	for (int j=0; j<64; j+=16){
-		__m512i v_merge = _mm512_set1_epi32(0);
-		for (int i=0; i<16; ++i){
-			//__m512i v_temp = _mm512_loadu_epi32(c2gBuffer+i*64+j);
-			__m512i v_temp = _mm512_load_epi32(c2gBuffer+i*64+j);
-			v_merge = _mm512_add_epi32(v_merge, v_temp);
-		}
-		//_mm512_storeu_epi32(c2g.data()+j, v_merge);
-		_mm512_store_epi32(c2g.data()+j, v_merge);
-	}
-	for (int j=0; j<64; j+=16){
-		__m512i v_merge = _mm512_set1_epi32(0);
-		for (int i=0; i<16; ++i){
-			//__m512i v_temp = _mm512_loadu_epi32(ceqBuffer+i*64+j);
-			__m512i v_temp = _mm512_load_epi32(ceqBuffer+i*64+j);
-			v_merge = _mm512_add_epi32(v_merge, v_temp);
-		}
-		//_mm512_storeu_epi32(ceq.data()+j, v_merge);
-		_mm512_store_epi32(ceq.data()+j, v_merge);
-	}
-
-	_mm_free(c1lBuffer);
-	_mm_free(c1gBuffer);
-	_mm_free(c2lBuffer);
-	_mm_free(c2gBuffer);
-	_mm_free(ceqBuffer);
-	//#if DEBUG
-	//	for(int i=0; i<64; i++){
-	//		if(c1l[i] != c1l_old[i])
-	//			fprintf(stdout," [W:%s:%d] error new=%ld, old=%ld \n", __LINE__, c1l[i], c1l_old[i]);
-	//		if(c1g[i] != c1g_old[i])
-	//			fprintf(stdout," [W:%s:%d] error new=%ld, old=%ld \n", __LINE__, c1g[i], c1g_old[i]);
-	//		if(c2l[i] != c2l_old[i])
-	//			fprintf(stdout," [W:%s:%d] error new=%ld, old=%ld \n", __LINE__, c2l[i], c2l_old[i]);
-	//		if(c2g[i] != c2g_old[i])
-	//			fprintf(stdout," [W:%s:%d] error new=%ld, old=%ld \n", __LINE__, c2g[i], c2g_old[i]);
-	//		if(ceq[i] != ceq_old[i])
-	//			fprintf(stdout," [W:%s:%d] error new=%ld, old=%ld \n", __LINE__, ceq[i], ceq_old[i]);
-	//	}
-	//#endif
-
-
-	return;
-}
-
-*/
-
-/*
-
-   template<typename T>
-   inline void avx2_statistic(std::vector<uint32_t> &sketch1, std::vector<uint32_t> &sketch2, T &c1l, T &c1g, T &c2l, T &c2g, T &ceq){
-//SIMD 
-//buffer
-//uint32_t * CBuffer;
-//CBuffer = _mm_malloc(16*64*5*sizeof(uint32_t), 32);//512
-
-uint32_t * c1lBuffer = _mm_malloc(8*64*sizeof(uint32_t), 32); //CBuffer;//8=256/32
-uint32_t * c1gBuffer = _mm_malloc(8*64*sizeof(uint32_t), 32); //CBuffer+16*64;
-uint32_t * c2lBuffer = _mm_malloc(8*64*sizeof(uint32_t), 32); //CBuffer+16*64*2;
-uint32_t * c2gBuffer = _mm_malloc(8*64*sizeof(uint32_t), 32); //CBuffer+16*64*3;
-uint32_t * ceqBuffer = _mm_malloc(8*64*sizeof(uint32_t), 32); //CBuffer+16*64*4;
-
-for(int i=0; i<64; ++i){
-for(int j=0; j<8; ++j){
-c1lBuffer[j*64+i] = 0;	
-c1gBuffer[j*64+i] = 0;	
-c2lBuffer[j*64+i] = 0;	
-c2gBuffer[j*64+i] = 0;	
-ceqBuffer[j*64+i] = 0;	
-}
-
-//fprintf(stdout,"%ld, ", c1[i]);
-}
-
-//__m512i v_epi32_1 = _mm512_set1_epi32(1);
-__m256i v_epi32_1 = _mm256_set1_epi32(1); //AVX
-__m256i v_def_val = _mm256_set1_epi32(63);
-__m256i v_scale = _mm256_set_epi32(
-64*7, 64*6, 64*5, 64*4,
-64*3, 64*2, 64, 0);
-
-for(uint64_t i=0; i<sketch1.size(); i+=8) {
-//load
-//__m512i v_sketch1 = _mm512_loadu_epi32(&sketch32_1[i]);
-__m256i v_sketch1 = _mm256_loadu_si256((__m256i *) &sketch1[i]);
-__m256i v_sketch2 = _mm256_loadu_si256((__m256i *) &sketch2[i]);
-__m256i v_index1 = _mm256_add_epi32(v_sketch1, v_scale);
-__m256i v_index2 = _mm256_add_epi32(v_sketch2, v_scale);
-
-//compare
-//__mmask16 v_msk_gt = _mm512_cmpgt_epi32_mask(v_sketch1, v_sketch2);
-__m256i v_msk_gt = _mm256_cmpgt_epi32(v_sketch1, v_sketch2);
-//gather
-//__m256i v_c1g = _mm256_mask_i32gather_epi32(v_def_val, v_msk_gt, v_index1, c1gBuffer, 4);
-__m256i v_c1g = _mm256_mask_i32gather_epi32(v_def_val, (int *) c1gBuffer, v_index1, v_msk_gt, 4);
-//__m512i v_c2l = _mm512_mask_i32gather_epi32(v_def_val, v_msk_gt, v_index2, c2lBuffer, 4);
-__m256i v_c2l = _mm256_mask_i32gather_epi32(v_def_val, (int *) c2lBuffer, v_index2, v_msk_gt, 4);
-//add
-//add mask
-__m256i v_add_gt = _mm256_and_si256(v_epi32_1, v_msk_gt);
-v_c1g = _mm256_add_epi32(v_c1g, v_add_gt);
-v_c2l = _mm256_add_epi32(v_c2l, v_add_gt);
-
-//scatter
-_mm256_fake_scatter_epi32(c1gBuffer, v_index1, v_c1g);
-_mm256_fake_scatter_epi32(c2lBuffer, v_index2, v_c2l);
-
-//compare
-//__mmask16 v_msk_eq = _mm512_cmpeq_epi32_mask(v_sketch1, v_sketch2);
-__m256i v_msk_eq = _mm256_cmpeq_epi32(v_sketch1, v_sketch2);
-//gather
-//__m512i v_ceq = _mm512_mask_i32gather_epi32(v_def_val, v_msk_eq, v_index1, ceqBuffer, 4);
-__m256i v_ceq = _mm256_mask_i32gather_epi32(v_def_val, (int *) ceqBuffer, v_index1, v_msk_eq, 4);
-//add
-//v_ceq = _mm512_maskz_add_epi32(v_msk_eq, v_ceq, v_epi32_1);
-__m256i v_add_eq = _mm256_and_si256(v_epi32_1, v_msk_eq);
-v_ceq = _mm256_add_epi32(v_ceq, v_add_eq);
-//scatter
-//_mm512_mask_i32scatter_epi32(ceqBuffer, v_msk_eq, v_index1, v_ceq, 4);
-_mm256_fake_scatter_epi32(ceqBuffer, v_index1, v_ceq);
-
-//compare // AVX2
-//__mmask16 v_msk_lt = _mm512_cmplt_epi32_mask(v_sketch1, v_sketch2);
-__m256i v_msk_lt = _mm256_xor_si256(_mm256_or_si256(v_msk_gt, v_msk_eq), v_epi32_1);
-//gather 
-//__m512i v_c1l = _mm512_mask_i32gather_epi32(v_def_val, v_msk_lt, v_index1, c1lBuffer, 4);
-//__m512i v_c2g = _mm512_mask_i32gather_epi32(v_def_val, v_msk_lt, v_index2, c2gBuffer, 4);
-__m256i v_c1l = _mm256_mask_i32gather_epi32(v_def_val, (int *) c1lBuffer, v_index1, v_msk_lt, 4);
-__m256i v_c2g = _mm256_mask_i32gather_epi32(v_def_val, (int *) c2gBuffer, v_index2, v_msk_lt, 4);
-//add
-//v_c1l = _mm512_maskz_add_epi32(v_msk_lt, v_c1l, v_epi32_1);
-//v_c2g = _mm512_maskz_add_epi32(v_msk_lt, v_c2g, v_epi32_1);
-__m256i v_add_lt = _mm256_and_si256(v_epi32_1, v_msk_lt);
-v_c1l = _mm256_add_epi32(v_c1l, v_add_lt);
-v_c2g = _mm256_add_epi32(v_c2g, v_add_lt);
-//scatter   
-//_mm512_mask_i32scatter_epi32(c1lBuffer, v_msk_lt, v_index1, v_c1l, 4);
-//_mm512_mask_i32scatter_epi32(c2gBuffer, v_msk_lt, v_index2, v_c2g, 4);
-_mm256_fake_scatter_epi32(c1lBuffer, v_index1, v_c1l);
-_mm256_fake_scatter_epi32(c2gBuffer, v_index2, v_c2g);
-
-
-}
-//merge
-
-//for(int i=0; i<64; ++i){
-//	for(int j=0; j<16; ++j){
-//		c1l[i] = c1l[i] + c1lBuffer[j*64+i];	
-//		c1g[i] = c1g[i] + c1gBuffer[j*64+i];	
-//		c2l[i] = c2l[i] + c2lBuffer[j*64+i];	
-//		c2g[i] = c2g[i] + c2gBuffer[j*64+i];	
-//		ceq[i] = ceq[i] + ceqBuffer[j*64+i];	
-//	}
-
-//	fprintf(stdout,"%ld, ", c1[i]);
-//}
-
-for (int j=0; j<64; j+=8){
-	__m256i v_merge = _mm256_set1_epi32(0);
-	for (int i=0; i<8; ++i){
-		__m256i v_temp = _mm256_loadu_si256((__m256i *) c1lBuffer+i*64+j);//512
-		v_merge = _mm256_add_epi32(v_merge, v_temp);
-	}
-	_mm256_store_si256((__m256i *)c1l.data()+j, v_merge);
-}
-for (int j=0; j<64; j+=8){
-	__m256i v_merge = _mm256_set1_epi32(0);
-	for (int i=0; i<8; ++i){
-		__m256i v_temp = _mm256_loadu_si256((__m256i *)c1gBuffer+i*64+j);
-		v_merge = _mm256_add_epi32(v_merge, v_temp);
-	}
-	_mm256_store_si256((__m256i *)c1g.data()+j, v_merge);
-}
-for (int j=0; j<64; j+=8){
-	__m256i v_merge = _mm256_set1_epi32(0);
-	for (int i=0; i<8; ++i){
-		__m256i v_temp = _mm256_loadu_si256((__m256i *)c2lBuffer+i*64+j);
-		v_merge = _mm256_add_epi32(v_merge, v_temp);
-	}
-	_mm256_store_si256((__m256i *)c2l.data()+j, v_merge);
-}
-for (int j=0; j<64; j+=8){
-	__m256i v_merge = _mm256_set1_epi32(0);
-	for (int i=0; i<8; ++i){
-		__m256i v_temp = _mm256_loadu_si256((__m256i *)c2gBuffer+i*64+j);
-		v_merge = _mm256_add_epi32(v_merge, v_temp);
-	}
-	_mm256_store_si256((__m256i *)c2g.data()+j, v_merge);
-}
-for (int j=0; j<64; j+=8){
-	__m256i v_merge = _mm256_set1_epi32(0);
-	for (int i=0; i<16; ++i){
-		__m256i v_temp = _mm256_loadu_si256((__m256i *)ceqBuffer+i*64+j);
-		v_merge = _mm256_add_epi32(v_merge, v_temp);
-	}
-	_mm256_store_si256((__m256i *)ceq.data()+j, v_merge);
-}
-
-_mm_free(c1lBuffer);
-_mm_free(c1gBuffer);
-_mm_free(c2lBuffer);
-_mm_free(c2gBuffer);
-_mm_free(ceqBuffer);
-return;
-}
-
-inline void _mm256_fake_scatter_epi32(uint32_t *mem_addr, __m256i vindex, __m256i src)
-{
-	for(int i=0; i<8; i++)
-		//mem_addr[((long long *)&vindex)[i]] = ((uint32_t *)&src)[i];
-		mem_addr[((uint32_t *)&vindex)[i]] = ((uint32_t *)&src)[i];
-	return;
-}
-*/
-
-
 template<typename T>
 void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::vector<uint8_t> &sketch2, T &c1, T &c2, T &cu, T &cg1, T &cg2, T &ceq) const {
-	assert(sketch1.size()==sketch2.size());//
+	assert(sketch1.size() == sketch2.size());
 	std::array<uint32_t, 64> c1l{0}, c2l{0}, c1g{0}, c2g{0};
-	/* */
-//#pragma vector aligned
-//#pragma omp simd aligned(sketch1, sketch2, c1l, c2l, c1g, c2g, ceq : 64)
-	for(uint64_t i=0; i<sketch1.size(); ++i) {
-//  __asm__ __volatile__("DEBUG0:":::);
-    uint8_t idx1 = sketch1[i];
-    uint8_t idx2 = sketch2[i];
-    int num =(idx1 < idx2);
-    //int num = ((idx1 - idx2) >> 31) & 1;
-    int num1 = (idx1 == idx2);
 
-    c1l[idx1] += num;
-    c2g[idx2] += num;
+	const uint64_t sz = sketch1.size();
+	constexpr uint64_t BLOCK = 512;
+	const uint8_t* __restrict__ s1 = sketch1.data();
+	const uint8_t* __restrict__ s2 = sketch2.data();
 
-    c1g[idx1] += 1 - num - num1;
-    c2l[idx2] += 1 - num - num1;
+	// Block-wise local histograms to reduce random writes into c1l/c2l/c1g/c2g/ceq
+	// (better cache locality, fewer store-forwarding stalls).
+	for (uint64_t start = 0; start < sz; start += BLOCK) {
+		const uint64_t end = (start + BLOCK < sz) ? (start + BLOCK) : sz;
+		std::array<uint32_t, 64> l1l{0}, l2l{0}, l1g{0}, l2g{0}, leq{0};
 
-    ceq[idx1] += num1;
+		uint64_t i = start;
+		const uint64_t end4 = start + ((end - start) & ~uint64_t(3));
+		for (; i < end4; i += 4) {
+			const uint8_t a0 = s1[i],     b0 = s2[i];
+			const uint8_t a1 = s1[i+1],   b1 = s2[i+1];
+			const uint8_t a2 = s1[i+2],   b2 = s2[i+2];
+			const uint8_t a3 = s1[i+3],   b3 = s2[i+3];
 
-//  __asm__ __volatile__("DEBUG1:":::);
-  
+			const int lt0 = (a0 < b0), eq0 = (a0 == b0), gt0 = 1 - lt0 - eq0;
+			const int lt1 = (a1 < b1), eq1 = (a1 == b1), gt1 = 1 - lt1 - eq1;
+			const int lt2 = (a2 < b2), eq2 = (a2 == b2), gt2 = 1 - lt2 - eq2;
+			const int lt3 = (a3 < b3), eq3 = (a3 == b3), gt3 = 1 - lt3 - eq3;
 
-		//TODO: SIMD
-		//if(sketch1[i]<sketch2[i]){
-		//	c1l[sketch1[i]]++;
-		//	c2g[sketch2[i]]++;
-		//} else if(sketch1[i]>sketch2[i]){
-		//	c1g[sketch1[i]]++;
-		//	c2l[sketch2[i]]++;
-		//} else{
-		//	ceq[sketch1[i]]++;
-		//}
+			l1l[a0] += lt0;  l2g[b0] += lt0;  l1g[a0] += gt0;  l2l[b0] += gt0;  leq[a0] += eq0;
+			l1l[a1] += lt1;  l2g[b1] += lt1;  l1g[a1] += gt1;  l2l[b1] += gt1;  leq[a1] += eq1;
+			l1l[a2] += lt2;  l2g[b2] += lt2;  l1g[a2] += gt2;  l2l[b2] += gt2;  leq[a2] += eq2;
+			l1l[a3] += lt3;  l2g[b3] += lt3;  l1g[a3] += gt3;  l2l[b3] += gt3;  leq[a3] += eq3;
+		}
+		for (; i < end; ++i) {
+			const uint8_t a = s1[i], b = s2[i];
+			const int lt = (a < b), eq = (a == b), gt = 1 - lt - eq;
+			l1l[a] += lt;  l2g[b] += lt;  l1g[a] += gt;  l2l[b] += gt;  leq[a] += eq;
+		}
+
+		for (int k = 0; k < 64; ++k) {
+			c1l[k] += l1l[k];  c2l[k] += l2l[k];
+			c1g[k] += l1g[k];  c2g[k] += l2g[k];
+			ceq[k] += leq[k];
+		}
 	}
-	/* 
-	   std::vector<uint32_t> sketch32_1, sketch32_2;
-	   for(uint64_t i=0; i<sketch1.size(); i++) {
-	   sketch32_1.push_back(sketch1[i]);
-	   sketch32_2.push_back(sketch2[i]);
-	   }
-	//SIMD
-	avx512_statistic(sketch32_1, sketch32_2, c1l, c1g, c2l, c2g, ceq);
-	//TODO: BUG in fake_scatter
-	//avx2_statistic(sketch32_1, sketch32_2, c1l, c1g, c2l, c2g, ceq);
-	*/
-	for(int i=0; i<64; ++i) {
-		c1[i] = c1l[i] + ceq[i] + c1g[i];
-		c2[i] = c2l[i] + ceq[i] + c2g[i];
-		cu[i] = c1g[i] + ceq[i] + c2g[i];
+
+	for (int i = 0; i < 64; ++i) {
+		c1[i]  = c1l[i] + ceq[i] + c1g[i];
+		c2[i]  = c2l[i] + ceq[i] + c2g[i];
+		cu[i]  = c1g[i] + ceq[i] + c2g[i];
 		cg1[i] = c1g[i];
 		cg2[i] = c2g[i];
-		//	fprintf(stdout,"%ld, ", c1[i]);
 	}
-
 }
 
 
 // Rolling-hash optimized update():
-//   - seqRevBuf_ (member vector) avoids per-call heap allocation.
-//   - Sliding-window encoding: advancing one position costs O(1) (2 shifts + 2 OR)
-//     instead of re-encoding all KMERLEN chars from scratch (was O(KMERLEN) = O(32)).
-//   - Canonical selection via uint64 compare replaces memcpy + memcmp.
-//   NOTE: hash output differs from the original memcmp-based version because the
-//         encoding order (A=0,C=1,T=2,G=3) does not match ASCII lex order (G < T),
-//         so uint64 canonical != string lex canonical.  All self-consistent sketches
-//         built with this version are mutually compatible.
- void HyperLogLog::update(char* seq) {
- 	const uint64_t LENGTH = strlen(seq);
- 	for(uint64_t i = 0; i < LENGTH; i++){
- 		if(seq[i] > 96 && seq[i] < 123){
- 			seq[i] -= 32;
- 		}
- 	}
+//   - No seqRev buffer: rev_enc is computed from seq by complement-on-read (saves
+//     full reverse-complement pass and cache pressure).
+//   - No upfront to-upper: 256-entry LUT encodes A/a->0, C/c->1, G/g->2, T/t->3
+//     so rolling uses one table lookup per base.
+//   - Window invalid_count: only when invalid_count==0 do we add the k-mer (N etc.).
+//   - Canonical = min(fwd_enc, rev_enc) with encoding A=0,C=1,G=2,T=3 (lex order).
+//   - Optional future: per-thread or block-local core_ buffer, merge at end, to
+//     reduce random writes when doing multi-threaded batch updates (p=12..16).
+	// A=65,C=67,G=71,T=84; a=97,c=99,g=103,t=116 -> 0,1,2,3.
+	static const uint8_t ENCODE_LUT[256] = {
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,  0,255,  1,255,255,255,  2,255,255,255,255,255,255,255,255,
+		255,255,255,255,  3,255,255,255,255,255,255,255,255,255,255,255,
+		255,  0,255,  1,255,255,255,  2,255,255,255,255,255,255,255,255,
+		255,255,255,255,  3,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+		255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+	};
+	// A=0, C=1, G=2, T=3 at indices 'A','a','C','c','G','g','T','t'; 255 elsewhere.
+	// Complement encoding: comp(e) = (e<=3) ? (3-e) : 255.
+	#define ENC(c)   (ENCODE_LUT[(uint8_t)(c)])
+	#define COMP(e)  ((uint8_t)((e) <= 3 ? 3 - (e) : 255))
+	#define VALID(e) ((e) <= 3)
+
+	void HyperLogLog::update(char* seq) {
+	const uint64_t LENGTH = strlen(seq);
+	const int KMERLEN = 32; // fills exactly 64 bits (2 bits/base)
+	if (LENGTH < (uint64_t)KMERLEN) return;
 
 	uint32_t qq = q();
 
-	// thread_local: one buffer per thread, reused across update() calls within
-	// the same thread.  Not stored in the sketch object, so no memory bloat when
-	// many HyperLogLog objects are kept alive simultaneously.
-	thread_local static std::vector<char> seqRevBuf;
-	seqRevBuf.resize(LENGTH);
- 	char* seqRev = seqRevBuf.data();
- 	char table[4] = {'T','G','A','C'};
- 	for ( uint64_t i = 0; i < LENGTH; i++ )
- 	{
- 		char base = seq[i];
- 		base >>= 1;
- 		base &= 0x03;
- 		seqRev[LENGTH - i - 1] = table[base];
- 	}
-
- 	const int KMERLEN = 32; // fills exactly 64 bits (2 bits/base)
- 	if(LENGTH < (uint64_t)KMERLEN) return;
-
-	// encode_base: A=0, C=1, T=2, G=3  (bits 2:1 of ASCII / 2)
-	auto encode_base = [](char c) -> uint64_t {
-		return (uint64_t)(((uint8_t)c & 0x06u) >> 1);
-	};
-
 	// Initialize rolling encodings for the k-mer at position 0.
-	// fwd_enc: MSB holds seq[0], LSB holds seq[KMERLEN-1].
-	// rev_enc: MSB holds seqRev[LENGTH-KMERLEN], LSB holds seqRev[LENGTH-1].
+	// fwd_enc: MSB = seq[0], LSB = seq[KMERLEN-1]. rev_enc: from complement of
+	// seq[KMERLEN-1..0], so MSB = comp(seq[KMERLEN-1]), LSB = comp(seq[0]).
 	uint64_t fwd_enc = 0, rev_enc = 0;
+	int invalid_count = 0;
 	for (int k = 0; k < KMERLEN; k++) {
-		fwd_enc = (fwd_enc << 2) | encode_base(seq[k]);
-		rev_enc = (rev_enc << 2) | encode_base(seqRev[LENGTH - KMERLEN + k]);
+		uint8_t ef = ENC(seq[k]);
+		if (!VALID(ef)) invalid_count++;
+		fwd_enc = (fwd_enc << 2) | (VALID(ef) ? (ef & 3u) : 0u);
+		rev_enc = (rev_enc << 2) | (VALID(ef) ? (COMP(ef) & 3u) : 0u);
 	}
 
 #if defined __AVX512F__  && defined __AVX512DQ__
@@ -485,24 +172,25 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 	const int lanes = 8;
 	const uint64_t N = ((LENGTH - KMERLEN) / lanes) * lanes;
 
-	// Main 8-lane loop.  Rolling hash advances by 1 for each of the 8 lanes,
-	// so the inner j-loop is sequential but does only 2 shifts+ORs per k-mer.
- 	for(uint64_t i = 0; i < N; i += lanes)
+	// Main 8-lane loop.  Rolling: fwd/rev from seq only; rev = complement by LUT.
+	// Only add k-mer when invalid_count == 0 (no N etc. in window).
+	for (uint64_t i = 0; i < N; i += lanes)
 	{
 		uint64_t resv[8];
+		bool lane_valid[8];
 		for (int j = 0; j < lanes; j++)
 		{
-			// Canonical = uint64-min of fwd and rev encodings.
-			resv[j] = (fwd_enc <= rev_enc) ? fwd_enc : rev_enc;
+			lane_valid[j] = (invalid_count == 0);
+			resv[j] = lane_valid[j] ? ((fwd_enc <= rev_enc) ? fwd_enc : rev_enc) : 0;
 
-			// Roll forward by one position:
-			//   fwd: drop MSB (old seq[i+j]) via left-shift overflow, add new LSB.
-			//   rev: drop LSB (old seqRev[LENGTH-(i+j)-1]) via right-shift,
-			//        add new MSB (seqRev[LENGTH-(i+j)-KMERLEN-1]).
-			uint64_t new_f = encode_base(seq[i + j + KMERLEN]);
-			fwd_enc = (fwd_enc << 2) | new_f;
-			uint64_t new_r = encode_base(seqRev[LENGTH - (i + j) - KMERLEN - 1]);
-			rev_enc = (rev_enc >> 2) | (new_r << (uint64_t)(2 * (KMERLEN - 1)));
+			// Roll: leaving = seq[i+j], entering = seq[i+j+KMERLEN].
+			uint8_t ef_out = ENC(seq[i + j]);
+			uint8_t ef_in  = ENC(seq[i + j + KMERLEN]);
+			if (!VALID(ef_out)) invalid_count--;
+			if (!VALID(ef_in))  invalid_count++;
+			fwd_enc = (fwd_enc << 2) | (VALID(ef_in) ? (ef_in & 3u) : 0u);
+			uint8_t er_in = VALID(ef_in) ? (COMP(ef_in) & 3u) : 0u;
+			rev_enc = (rev_enc >> 2) | ((uint64_t)er_in << (2 * (KMERLEN - 1)));
 		}
 
 		uint64_t hashvalv[8];
@@ -543,6 +231,7 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 		#endif
 
 		for (int j = 0; j < lanes; j++) {
+			if (!lane_valid[j]) continue;
 			core_[indexv[j]] = std::max(core_[indexv[j]], (uint8_t)lztv[j]);
 #if LZ_COUNTER
 			++clz_counts_[clz(((hashvalv[j] << 1) | 1) << (np_ - 1)) + 1];
@@ -550,25 +239,31 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 		}
 	}
 
-	// Remainder: continue rolling from position N (state already correct).
- 	for(uint64_t i = N; i < LENGTH - KMERLEN; ++i)
+	// Remainder: continue rolling from position N; only add when invalid_count==0.
+	for (uint64_t i = N; i < LENGTH - KMERLEN; ++i)
 	{
-		uint64_t res = (fwd_enc <= rev_enc) ? fwd_enc : rev_enc;
-		uint64_t hashval = mc::murmur3_fmix(res, 42);
-		const uint32_t index = hashval >> qq;
-		const uint8_t lzt = clz(((hashval << 1) | 1) << (np_ - 1)) + 1;
-		core_[index] = std::max(core_[index], lzt);
+		if (invalid_count == 0) {
+			uint64_t res = (fwd_enc <= rev_enc) ? fwd_enc : rev_enc;
+			uint64_t hashval = mc::murmur3_fmix(res, 42);
+			const uint32_t index = hashval >> qq;
+			const uint8_t lzt = clz(((hashval << 1) | 1) << (np_ - 1)) + 1;
+			core_[index] = std::max(core_[index], lzt);
 #if LZ_COUNTER
-		++clz_counts_[clz(((hashval << 1) | 1) << (np_ - 1)) + 1];
+			++clz_counts_[clz(((hashval << 1) | 1) << (np_ - 1)) + 1];
 #endif
-		// Roll (reads are always in-bounds; rolled value only used if i+1 < LENGTH-KMERLEN).
-		uint64_t new_f = encode_base(seq[i + KMERLEN]);
-		fwd_enc = (fwd_enc << 2) | new_f;
-		uint64_t new_r = encode_base(seqRev[LENGTH - i - KMERLEN - 1]);
-		rev_enc = (rev_enc >> 2) | (new_r << (uint64_t)(2 * (KMERLEN - 1)));
- 	}
-	// seqRevBuf_ is a member; no delete needed.
- }
+		}
+		uint8_t ef_out = ENC(seq[i]);
+		uint8_t ef_in  = ENC(seq[i + KMERLEN]);
+		if (!VALID(ef_out)) invalid_count--;
+		if (!VALID(ef_in))  invalid_count++;
+		fwd_enc = (fwd_enc << 2) | (VALID(ef_in) ? (ef_in & 3u) : 0u);
+		uint8_t er_in = VALID(ef_in) ? (COMP(ef_in) & 3u) : 0u;
+		rev_enc = (rev_enc >> 2) | ((uint64_t)er_in << (2 * (KMERLEN - 1)));
+	}
+	#undef ENC
+	#undef COMP
+	#undef VALID
+}
  
 //void HyperLogLog::update(char* seq) {
 //    const uint64_t LENGTH = strlen(seq);
@@ -880,11 +575,32 @@ ERTL_IMPROVED_EST: {
 #if ENABLE_COMPUTED_GOTO
 ERTL_MLE_EST: return ertl_ml_estimate(counts, p, 64 - p, relerr);
 #else
-					   case ERTL_MLE: return ertl_ml_estimate(counts, p, 64 - p, relerr);
-					   default: return 0.0;
-				   }
+				   case ERTL_MLE: return ertl_ml_estimate(counts, p, 64 - p, relerr);
+				   default: return 0.0;
+			   }
 #endif
-			}
+		}
+
+
+// ── equalRegisterFraction ─────────────────────────────────────────────────────
+double HyperLogLog::equalRegisterFraction(const HyperLogLog& other) const
+{
+	const int n = (int)core_.size();
+	if(n == 0 || n != (int)other.core_.size()) return 0.0;
+	return (double)hll_count_equal_regs(core_.data(), other.core_.data(), n) / n;
+}
+
+// ── distanceFiltered ──────────────────────────────────────────────────────────
+// Applies a cheap SIMD equal-register pre-check before the expensive Ertl MLE.
+// Returns -1.0 when the pair is provably below min_jaccard; exact distance otherwise.
+double HyperLogLog::distanceFiltered(const HyperLogLog& other,
+                                     double min_jaccard,
+                                     double prefilter_factor) const
+{
+	if(equalRegisterFraction(other) < min_jaccard * prefilter_factor)
+		return -1.0;
+	return distance(other);
+}
 
 
 

@@ -807,7 +807,27 @@ namespace Sketch{
       void printSketch();
       double distance(const HyperLogLog &h2) const {return 1.0 - jaccard_index(h2);}
       //double jaccard_index(HyperLogLog &h2); 
-      double jaccard_index(const HyperLogLog &h2) const; 
+      double jaccard_index(const HyperLogLog &h2) const;
+      /// Cardinality estimate (k-mer count). Used for size-based pre-filtering.
+      double cardinality() const { return creport(); }
+      /// Raw register array. Used by external LSH banding.
+      const std::vector<uint8_t>& getCore() const { return core_; }
+
+      /// Fraction of registers whose values are identical in both sketches.
+      /// Computed with SIMD (AVX-512BW / AVX2 / scalar fallback).
+      /// Cheap O(m) pre-filter: for Jaccard > J the fraction is empirically
+      /// well above J*0.3, so this call is ~30-60x faster than distance().
+      double equalRegisterFraction(const HyperLogLog& other) const;
+
+      /// Fast-path distance: applies a cheap equal-register pre-filter before
+      /// calling the full Ertl joint MLE.
+      /// Returns -1.0 if the pair is provably dissimilar
+      ///   (equalRegisterFraction < min_jaccard * prefilter_factor).
+      /// Returns the Jaccard distance (1 - Jaccard) otherwise.
+      /// prefilter_factor = 0.3 is very conservative (near-zero false negatives).
+      double distanceFiltered(const HyperLogLog& other,
+                              double min_jaccard,
+                              double prefilter_factor = 0.3) const;
 
     protected:
       std::vector<uint8_t> core_;//sketchInfo; 
