@@ -96,22 +96,7 @@ int main(int argc, char* argv[])
   double t2 = get_sec();
   cerr << "sketch time is: " << t2 - t1 << endl;
 
-	string cmd = "mkdir -p res_dir";
-	int ret = system(cmd.c_str());
-	if(ret == 0){
-		cerr << "write the result int the directory: res_dir" << endl;
-	}
-	else{
-		cerr << "ERROR: cannot create the directory: res_dir" << endl;
-		return 1;
-	}
-
-	vector<FILE*> fp_arr;
-	for(int i = 0; i < numThreads; i++){
-		string file_name = "res_dir/res.dist." + to_string(i);
-		FILE* fp = fopen(file_name.c_str(), "w+");
-		fp_arr.push_back(fp);
-	}
+	vector<string> thread_bufs(numThreads);
 
 	const int n = (int)vhlog.size();
 	cerr << "vhlog size is: " << n << endl;
@@ -232,11 +217,20 @@ int main(int argc, char* argv[])
 		// Guard 2: full Ertl joint MLE
 		cnt_exact++;
 		double dist = vhlog[i].distance(vhlog[j]);
-		if(dist < thres)
-			fprintf(fp_arr[tid], "%s\t%s\t%lf\n",
-			        resFileName[i].c_str(), resFileName[j].c_str(), dist);
+		if(dist < thres) {
+			char line[4096];
+			int len = snprintf(line, sizeof(line), "%s\t%s\t%lf\n",
+			                   resFileName[i].c_str(), resFileName[j].c_str(), dist);
+			thread_bufs[tid].append(line, len);
+		}
 	}
-	for(int i = 0; i < numThreads; i++) fclose(fp_arr[i]);
+
+	// Flush all buffers to a single output file
+	system("mkdir -p res_dir");
+	FILE* fp_out = fopen("res_dir/res.dist.HLL", "w");
+	for(int t = 0; t < numThreads; t++)
+		fwrite(thread_bufs[t].data(), 1, thread_bufs[t].size(), fp_out);
+	fclose(fp_out);
 
 	double t3 = get_sec();
 	cerr << "dist time is: " << t3 - t_lsh << " s" << endl;

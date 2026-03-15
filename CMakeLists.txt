@@ -35,7 +35,7 @@ if (CXXAPI)
 
 	install(FILES "src/Sketch.h" "src/robin_hood.h" "src/MinHash.h" 
 		          "src/hash.h" "src/histoSketch.h"
-				  "src/HyperLogLog.h"
+				  "src/HyperLogLog.h" "src/SetSketch.h"
 		      "src/common.h" "src/common.cpp"    "src/hash.h" "src/OrderMinHash.h" "src/histoSketch.h"
 				 "src/kseq.h" "src/robin_hood.h" "src/HyperLogLog.h" "src/Kssd.h"  "src/Kssd.cpp" "src/shuffle.h" "src/shuffle.cpp"
 			DESTINATION include

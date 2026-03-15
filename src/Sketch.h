@@ -11,6 +11,7 @@
 #include "MinHash.h"
 #include "histoSketch.h"
 #include "HyperLogLog.h"
+#include "SetSketch.h"
 //#include "Kssd.h"
 #include <cstdint>
 #if defined(_MSC_VER)
