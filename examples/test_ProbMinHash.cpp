@@ -1,23 +1,14 @@
 /**
- * test_ProbMinHash – benchmark harness for ProbMinHash4 sketch.
+ * test_ProbMinHash – benchmark harness for ProbMinHash4.
  *
- * Mirrors the structure of test_HLL.cpp and test_SetSketch.cpp:
- *   Phase 0 : pre-allocate sketch objects
- *   Phase 1 : parallel sketch construction (rolling canonical k-mers)
- *   Phase 2 : LSH banding on flat register arrays → candidate pairs
- *   Phase 3 : verify candidates with exact distance()
- *
- * Probability Jaccard distance = 1 - J_p.
- * The Jaccard estimator is: fraction of registers that carry identical
- * minimum-hash values (standard ProbMinHash bottom-k estimator).
+ * Structure mirrors test_MinHash.cpp (no serial pre-allocation):
+ *   - File list read (serial, fast).
+ *   - Parallel loop: each thread opens one file, constructs one ProbMinHash4,
+ *     reads + updates, then critical push_back.  No long serial "Phase 0".
+ *   - Flatten registers to flat array, LSH banding, candidate verification.
  *
  * Usage:
  *   exe_test_ProbMinHash <file_list> <dist_threshold> <threads> [max_bucket=500]
- *
- * <file_list>      : one genome file path per line (gzipped FASTA/FASTQ)
- * <dist_threshold> : output pairs with distance < threshold (e.g. 0.1)
- * <threads>        : number of OpenMP threads
- * [max_bucket]     : LSH bucket cap to avoid candidate explosion (default 500)
  */
 
 #include "probmh.h"
@@ -28,6 +19,7 @@
 #include <sys/time.h>
 #include <err.h>
 #include <omp.h>
+#include <immintrin.h>
 
 #include <vector>
 #include <string>
@@ -35,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <limits>
 
 #if defined(__GNUC__) && defined(_OPENMP)
 #  include <parallel/algorithm>
@@ -43,6 +36,48 @@
 using namespace std;
 
 KSEQ_INIT(gzFile, gzread)
+
+// ── Inline Jaccard on flat double array ──────────────────────────────────────
+// Counts registers where a[k] == b[k] and a[k] != inf.
+// Identical to ProbMinHash4::jaccard() but operates on raw pointers so the
+// compiler sees two non-aliasing arrays and can auto-vectorise / use SIMD.
+static inline double flat_jaccard(const double* __restrict__ a,
+                                  const double* __restrict__ b,
+                                  int m)
+{
+    const double inf = numeric_limits<double>::infinity();
+    int count = 0;
+    int k = 0;
+
+#if defined(__AVX512F__)
+    {
+        __m512d vinf = _mm512_set1_pd(inf);
+        for (; k + 8 <= m; k += 8) {
+            __m512d va = _mm512_loadu_pd(a + k);
+            __m512d vb = _mm512_loadu_pd(b + k);
+            __mmask8 eq     = _mm512_cmp_pd_mask(va, vb, _CMP_EQ_OQ);
+            __mmask8 notinf = _mm512_cmp_pd_mask(va, vinf, _CMP_NEQ_UQ);
+            count += __builtin_popcount(eq & notinf);
+        }
+    }
+#elif defined(__AVX2__)
+    {
+        __m256d vinf = _mm256_set1_pd(inf);
+        for (; k + 4 <= m; k += 4) {
+            __m256d va  = _mm256_loadu_pd(a + k);
+            __m256d vb  = _mm256_loadu_pd(b + k);
+            __m256d ceq = _mm256_cmp_pd(va, vb, _CMP_EQ_OQ);
+            __m256d cni = _mm256_cmp_pd(va, vinf, _CMP_NEQ_UQ);
+            __m256d res = _mm256_and_pd(ceq, cni);
+            count += __builtin_popcount(_mm256_movemask_pd(res));
+        }
+    }
+#endif
+    for (; k < m; ++k)
+        count += (a[k] == b[k] && a[k] != inf) ? 1 : 0;
+
+    return (double)count / (double)m;
+}
 
 int main(int argc, char* argv[])
 {
@@ -66,27 +101,35 @@ int main(int argc, char* argv[])
     const int n = (int)fileArr.size();
     cerr << "===== total files: " << n << "  (ProbMinHash4)" << endl;
 
-    // ── Sketch parameters ────────────────────────────────────────────────────
-    static const uint32_t M     = 1024;  // number of registers
-    static const int      KSIZE = 21;    // k-mer length
+    static const uint32_t M     = 1024;
+    static const int      KSIZE = 21;
     static const uint64_t SEED  = 42;
+    const int m = (int)M;
 
-    // ── Phase 0: pre-allocate sketch objects (serial) ────────────────────────
+    // Like test_MinHash: no serial pre-allocation. Each thread builds one sketch
+    // (open file → construct ProbMinHash4 → read+update → critical push_back).
     vector<Sketch::ProbMinHash4> vsketches;
+    vector<string>               paths;   // paths[i] = file path for vsketches[i]
     vsketches.reserve(n);
-    for (int i = 0; i < n; i++)
-        vsketches.emplace_back(M, KSIZE, SEED);
+    paths.reserve(n);
 
-    // ── Phase 1: parallel sketch construction ────────────────────────────────
     double t1 = get_sec();
 
     #pragma omp parallel for num_threads(numThreads) schedule(dynamic)
     for (int t = 0; t < n; t++) {
-        gzFile  fp1 = gzopen(fileArr[t].c_str(), "r");
+        gzFile fp1 = gzopen(fileArr[t].c_str(), "r");
         if (fp1 == NULL) continue;
         kseq_t* ks1 = kseq_init(fp1);
+
+        Sketch::ProbMinHash4 sk(M, KSIZE, SEED);
         while (kseq_read(ks1) >= 0)
-            vsketches[t].update(ks1->seq.s);
+            sk.update(ks1->seq.s);
+
+        #pragma omp critical
+        {
+            vsketches.push_back(std::move(sk));
+            paths.push_back(fileArr[t]);
+        }
         kseq_destroy(ks1);
         gzclose(fp1);
     }
@@ -94,26 +137,27 @@ int main(int argc, char* argv[])
     double t2 = get_sec();
     cerr << "sketch time: " << t2 - t1 << " s" << endl;
 
-    // ── Phase 2: extract flat register arrays for cache-friendly LSH ─────────
-    // Each sketch stores M doubles; pack them row-major into a flat array.
-    const int m = (int)M;
-    vector<double> flat_regs((size_t)n * m);
+    const int n_actual = (int)vsketches.size();
+    if (n_actual == 0) { cerr << "no sketches built" << endl; return 1; }
+
+    // Flatten: pack registers row-major for cache-friendly distance + LSH.
+    vector<double> flat_regs((size_t)n_actual * m);
 
     #pragma omp parallel for num_threads(numThreads) schedule(static)
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n_actual; i++) {
         const double* src = vsketches[i].getRegisters().data();
         memcpy(&flat_regs[(size_t)i * m], src, m * sizeof(double));
     }
+    { vector<Sketch::ProbMinHash4>().swap(vsketches); }
+
     double t_flat = get_sec();
-    cerr << "  flatten registers (parallel): " << t_flat - t2 << " s" << endl;
+    cerr << "flatten + free sketches: " << t_flat - t2 << " s" << endl;
 
     // ── Phase 3: LSH banding ─────────────────────────────────────────────────
-    // Hash each band of ROWS consecutive register values into a bucket key.
-    // Two sketches that share at least one band hash are candidate pairs.
+    // Band hash: FNV-1a over the raw bytes of one band of doubles.
     const int BANDS = 128;
-    const int ROWS  = m / BANDS;  // 8 registers per band with M=1024, BANDS=128
+    const int ROWS  = m / BANDS;   // 8 registers per band with M=1024
 
-    // Band hash: FNV-1a over the raw double bytes of one band
     auto band_hash = [&](const double* data, int rows) -> uint32_t {
         uint32_t h = 2166136261u;
         const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
@@ -124,9 +168,9 @@ int main(int argc, char* argv[])
         return h;
     };
 
-    vector<pair<uint64_t,int>> band_entries((size_t)n * BANDS);
+    vector<pair<uint64_t,int>> band_entries((size_t)n_actual * BANDS);
     #pragma omp parallel for num_threads(numThreads) schedule(static)
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n_actual; i++) {
         const double* regs = &flat_regs[(size_t)i * m];
         for (int b = 0; b < BANDS; b++) {
             uint32_t h = band_hash(regs + b * ROWS, ROWS);
@@ -143,7 +187,7 @@ int main(int argc, char* argv[])
     sort(band_entries.begin(), band_entries.end());
 #endif
     double t_sort = get_sec();
-    cerr << "  sort band_entries: " << t_sort - t_build << " s" << endl;
+    cerr << "  sort band_entries [PARALLEL]: " << t_sort - t_build << " s" << endl;
 
     // Group boundaries
     vector<size_t> group_start;
@@ -179,7 +223,7 @@ int main(int argc, char* argv[])
     band_entries.clear();
     band_entries.shrink_to_fit();
 
-    // Merge per-thread candidates into contiguous array
+    // Merge per-thread candidates
     vector<size_t> prefix((size_t)numThreads + 1);
     prefix[0] = 0;
     for (int t = 0; t < numThreads; t++)
@@ -207,7 +251,7 @@ int main(int argc, char* argv[])
     double t_lsh = get_sec();
     cerr << "  sort+dedup candidates: " << t_lsh - t_scan << " s" << endl;
 
-    const long long total_pairs = (long long)n * (n - 1) / 2;
+    const long long total_pairs = (long long)n_actual * (n_actual - 1) / 2;
     cerr << "LSH candidates: " << candidates.size()
          << " / " << total_pairs << " total pairs"
          << "  (reduction: "
@@ -215,10 +259,11 @@ int main(int argc, char* argv[])
          << "%)" << endl;
     cerr << "LSH index time (total): " << t_lsh - t2 << " s" << endl;
 
-    // ── Phase 4: verify candidates with exact distance ───────────────────────
-    // Thread-local string buffers → zero disk IO during computation.
+    // ── Phase 4: verify candidates with inline SIMD distance ─────────────────
+    // Operates on flat_regs directly – no object indirection, no indirect ptr.
+    // Prefetch the next pair's register arrays to hide memory latency.
     vector<string> thread_bufs(numThreads);
-    const int    ncand       = (int)candidates.size();
+    const int    ncand = (int)candidates.size();
     atomic<long long> cnt_exact{0};
 
     #pragma omp parallel for num_threads(numThreads) schedule(dynamic, 4096)
@@ -226,17 +271,26 @@ int main(int argc, char* argv[])
         int i = candidates[c].first, j = candidates[c].second;
         int tid = omp_get_thread_num();
 
+        // Prefetch next pair's data
+        if (c + 1 < ncand) {
+            __builtin_prefetch(&flat_regs[(size_t)candidates[c+1].first  * m], 0, 1);
+            __builtin_prefetch(&flat_regs[(size_t)candidates[c+1].second * m], 0, 1);
+        }
+
         cnt_exact++;
-        double dist = vsketches[i].distance(vsketches[j]);
+        const double* ra = &flat_regs[(size_t)i * m];
+        const double* rb = &flat_regs[(size_t)j * m];
+        double jaccard = flat_jaccard(ra, rb, m);
+        double dist    = 1.0 - jaccard;
+
         if (dist < thres) {
             char line[4096];
             int len = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
-                               fileArr[i].c_str(), fileArr[j].c_str(), dist);
+                               paths[i].c_str(), paths[j].c_str(), dist);
             thread_bufs[tid].append(line, len);
         }
     }
 
-    // Flush all buffers to a single output file
     system("mkdir -p res_dir");
     FILE* fp_out = fopen("res_dir/res.dist.ProbMinHash", "w");
     for (int t = 0; t < numThreads; t++)
@@ -245,8 +299,8 @@ int main(int argc, char* argv[])
 
     double t3 = get_sec();
     cerr << "dist time: " << t3 - t_lsh << " s" << endl;
-    cerr << "  candidates:      " << (long long)candidates.size() << endl;
-    cerr << "  output pairs:    " << cnt_exact.load() << endl;
+    cerr << "  candidates:   " << (long long)candidates.size() << endl;
+    cerr << "  exact computed: " << cnt_exact.load() << endl;
     cerr << "total time: " << t3 - t1 << " s" << endl;
 
     return 0;

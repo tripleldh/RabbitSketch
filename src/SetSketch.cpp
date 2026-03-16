@@ -281,7 +281,8 @@ void SetSketch::update(char* seq) {
     uint8_t ef = ENC(seq[k]);
     if (!VALID(ef)) invalid_count++;
     fwd_enc = (fwd_enc << 2) | (VALID(ef) ? (ef & 3u) : 0u);
-    rev_enc = (rev_enc << 2) | (VALID(ef) ? (COMP(ef) & 3u) : 0u);
+    uint8_t er = VALID(ef) ? (COMP(ef) & 3u) : 0u;
+    rev_enc = (rev_enc >> 2) | (static_cast<uint64_t>(er) << (2 * (KMERLEN - 1)));
   }
 
   const int lanes = 8;

@@ -353,6 +353,9 @@ static const uint8_t ENC_LUT[256] = {
 #define PMH_COMP(e)  ((uint8_t)((e) <= 3 ? 3 - (e) : 255))
 #define PMH_VALID(e) ((e) <= 3)
 
+// Reused constant: 2^{-53} for uniform extraction from RNG (avoids repeated division).
+static const double PMH_INV2_53 = 1.0 / (double)(1ULL << 53);
+
 // ═══════════════════════════════════════════════════════════════════════════
 // swap helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -364,10 +367,11 @@ void Sketch::swap(ProbMHMaxTracker& a, ProbMHMaxTracker& b) noexcept {
 }
 
 void Sketch::swap(ProbMHPermStream& a, ProbMHPermStream& b) noexcept {
-    std::swap(a.m_,   b.m_);
-    std::swap(a.idx_, b.idx_);
-    std::swap(a.ver_, b.ver_);
-    std::swap(a.pv_,  b.pv_);
+    std::swap(a.m_,       b.m_);
+    std::swap(a.idx_,     b.idx_);
+    std::swap(a.ver_,     b.ver_);
+    std::swap(a.val_,     b.val_);
+    std::swap(a.ver_arr_, b.ver_arr_);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -411,12 +415,13 @@ double ProbMHMaxTracker::getMax() const {
 
 ProbMHPermStream::ProbMHPermStream(uint32_t m)
     : m_(m), idx_(0), ver_(0),
-      pv_(new std::pair<uint32_t,uint32_t>[m]) {}
+      val_(new uint32_t[m]),
+      ver_arr_(new uint32_t[m]) {}
 
 void ProbMHPermStream::reset() {
     idx_ = 0;
     if (ver_ == 0 || ver_ == UINT32_MAX) {
-        for (uint32_t i = 0; i < m_; ++i) pv_[i] = {i, 0};
+        for (uint32_t i = 0; i < m_; ++i) { val_[i] = i; ver_arr_[i] = 0; }
         ver_ = 1;
     } else {
         ++ver_;
@@ -425,9 +430,11 @@ void ProbMHPermStream::reset() {
 
 uint32_t ProbMHPermStream::next(uint64_t& rng) {
     const uint32_t k = idx_ + wy_uniform_int(m_ - idx_, rng);
-    const uint32_t result = (pv_[k].second != ver_) ? k : pv_[k].first;
-    const uint32_t x     = (pv_[idx_].second != ver_) ? idx_ : pv_[idx_].first;
-    pv_[k] = {x, ver_};
+    const uint32_t v = ver_;
+    const uint32_t result = (ver_arr_[k] != v) ? k : val_[k];
+    const uint32_t x     = (ver_arr_[idx_] != v) ? idx_ : val_[idx_];
+    val_[k]     = x;
+    ver_arr_[k] = v;
     ++idx_;
     return result;
 }
@@ -517,14 +524,21 @@ ProbMinHash4& ProbMinHash4::operator=(ProbMinHash4 other) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void ProbMinHash4::addHash(uint64_t h) {
-    uint64_t rng = mc::murmur3_fmix(h, seed_);
+    addHashFromRng(mc::murmur3_fmix(h, seed_));
+}
 
-    // Compute first hash value BEFORE perm_.reset() — if the first value
-    // already exceeds the global max, skip the expensive reset+permutation.
-    double hv = ted_sample(ted_c1_[0], ted_c2_[0], ted_c3_[0], ted_rate_[0], rng);
-    if (!tracker_.isUpdatePossible(hv)) return;     // Opt #3: early exit
+void ProbMinHash4::addHashFromRng(uint64_t rng) {
+    // Fast path (~97%): first value is u*c1[0] when u*c1[0]<1.
+    const double u0 = (double)(rng >> 11) * PMH_INV2_53;
+    const double hv0 = u0 * ted_c1_[0];
+    double hv;
+    if (__builtin_expect(hv0 < 1.0, 1))
+        hv = hv0;
+    else
+        hv = ted_sample(ted_c1_[0], ted_c2_[0], ted_c3_[0], ted_rate_[0], rng);
+    if (!tracker_.isUpdatePossible(hv)) return;
 
-    perm_.reset();      // only paid when hv can actually update something
+    perm_.reset();
 
     uint32_t i = 1;
     while (tracker_.isUpdatePossible(hv)) {
@@ -539,7 +553,7 @@ void ProbMinHash4::addHash(uint64_t h) {
             hv = boundaries_[i - 1] + delta;
         } else {
             hv = boundaries_[m_ - 2] +
-                 firstBoundaryInv_ * zig_exponential(rng); // Opt #1: ziggurat
+                 firstBoundaryInv_ * zig_exponential(rng);
             if (tracker_.isUpdatePossible(hv)) {
                 uint32_t k2 = perm_.next(rng);
                 if (tracker_.update(k2, hv))
@@ -564,6 +578,7 @@ void ProbMinHash4::update(char* seq) {
     const uint64_t loc_seed = seed_;
 
     // ── Seed the rolling window ──────────────────────────────────────────
+    const uint64_t kmer_mask = (K == 32) ? ~0ULL : ((1ULL << (2 * K)) - 1);
     uint64_t fwd = 0, rev = 0;
     int inv = 0;
     for (int k = 0; k < K; ++k) {
@@ -571,7 +586,7 @@ void ProbMinHash4::update(char* seq) {
         if (!PMH_VALID(ef)) inv++;
         fwd = (fwd << 2) | (PMH_VALID(ef) ? (ef & 3u) : 0u);
         uint8_t er = PMH_VALID(ef) ? PMH_COMP(ef) : 0u;
-        rev = (rev << 2) | (er & 3u);
+        rev = (rev >> 2) | (static_cast<uint64_t>(er & 3u) << (2 * (K - 1)));
     }
 
     // ── Opt #2: 8-lane batched hashing (SIMD for murmur3_fmix) ──────────
@@ -592,7 +607,7 @@ void ProbMinHash4::update(char* seq) {
             uint8_t ef_in  = PMH_ENC(seq[pos + K]);
             if (!PMH_VALID(ef_out)) inv--;
             if (!PMH_VALID(ef_in))  inv++;
-            fwd = (fwd << 2) | (PMH_VALID(ef_in) ? (ef_in & 3u) : 0u);
+            fwd = ((fwd << 2) | (PMH_VALID(ef_in) ? (ef_in & 3u) : 0u)) & kmer_mask;
             uint8_t er_in = PMH_VALID(ef_in) ? (PMH_COMP(ef_in) & 3u) : 0u;
             rev = (rev >> 2) | (static_cast<uint64_t>(er_in) << (2 * (K - 1)));
         }
@@ -619,26 +634,35 @@ void ProbMinHash4::update(char* seq) {
             hashvalv[j] = mc::murmur3_fmix(resv[j], loc_seed);
 #endif
 
-        // ── Per-hash: addHash with internal early-return ─────────────────
+        // ── Per-hash: prefilter then addHashFromRng (reuse rng, no second fmix)
+        const double cur_max = tracker_.getMax();
+        const double loc_c1_0 = ted_c1_[0];
         for (int j = 0; j < lanes; ++j) {
             if (!lane_valid[j]) continue;
-            addHash(hashvalv[j]);
+            uint64_t rng_inner = mc::murmur3_fmix(hashvalv[j], seed_);
+            double hv_fast = (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0;
+            if (__builtin_expect(hv_fast < 1.0, 1) && hv_fast >= cur_max) continue;
+            addHashFromRng(rng_inner);
         }
     }
 
     // ── Remainder loop (scalar) ──────────────────────────────────────────
+    const double loc_c1_0_rem = ted_c1_[0];
     for (uint64_t i = N_batch; i <= N_body; ++i) {
         if (inv == 0) {
             uint64_t canonical = (fwd <= rev) ? fwd : rev;
             uint64_t h = mc::murmur3_fmix(canonical, loc_seed);
-            addHash(h);
+            uint64_t rng_inner = mc::murmur3_fmix(h, seed_);
+            double hv_fast = (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0_rem;
+            if (__builtin_expect(hv_fast < 1.0, 1) && hv_fast >= tracker_.getMax()) continue;
+            addHashFromRng(rng_inner);
         }
         if (i < N_body) {
             uint8_t ef_out = PMH_ENC(seq[i]);
             uint8_t ef_in  = PMH_ENC(seq[i + K]);
             if (!PMH_VALID(ef_out)) inv--;
             if (!PMH_VALID(ef_in))  inv++;
-            fwd = (fwd << 2) | (PMH_VALID(ef_in) ? (ef_in & 3u) : 0u);
+            fwd = ((fwd << 2) | (PMH_VALID(ef_in) ? (ef_in & 3u) : 0u)) & kmer_mask;
             uint8_t er_in = PMH_VALID(ef_in) ? (PMH_COMP(ef_in) & 3u) : 0u;
             rev = (rev >> 2) | (static_cast<uint64_t>(er_in) << (2 * (K - 1)));
         }
@@ -695,11 +719,45 @@ double ProbMinHash4::jaccard(const ProbMinHash4& other) const {
 ProbMinHash4 ProbMinHash4::merge(const ProbMinHash4& other) const {
     assert(m_ == other.m_ && kmer_size_ == other.kmer_size_);
     ProbMinHash4 ret(m_, kmer_size_, seed_);
-    for (uint32_t k = 0; k < m_; ++k) {
-        double v = std::min(regs_[k], other.regs_[k]);
-        ret.regs_[k] = v;
-        if (v != std::numeric_limits<double>::infinity())
-            ret.tracker_.update(k, v);
+    const double* __restrict__ a = regs_.data();
+    const double* __restrict__ b = other.regs_.data();
+    double* __restrict__ r = ret.regs_.data();
+    const double inf = std::numeric_limits<double>::infinity();
+    uint32_t k = 0;
+
+#if defined(__AVX512F__)
+    {
+        __m512d vinf = _mm512_set1_pd(inf);
+        for (; k + 8 <= m_; k += 8) {
+            __m512d va = _mm512_loadu_pd(a + k);
+            __m512d vb = _mm512_loadu_pd(b + k);
+            __m512d vr = _mm512_min_pd(va, vb);
+            _mm512_storeu_pd(r + k, vr);
+            for (int i = 0; i < 8; ++i) {
+                double v = r[k + i];
+                if (v != inf) ret.tracker_.update(k + i, v);
+            }
+        }
+    }
+#elif defined(__AVX2__)
+    {
+        __m256d vinf = _mm256_set1_pd(inf);
+        for (; k + 4 <= m_; k += 4) {
+            __m256d va = _mm256_loadu_pd(a + k);
+            __m256d vb = _mm256_loadu_pd(b + k);
+            __m256d vr = _mm256_min_pd(va, vb);
+            _mm256_storeu_pd(r + k, vr);
+            for (int i = 0; i < 4; ++i) {
+                double v = r[k + i];
+                if (v != inf) ret.tracker_.update(k + i, v);
+            }
+        }
+    }
+#endif
+    for (; k < m_; ++k) {
+        double v = std::min(a[k], b[k]);
+        r[k] = v;
+        if (v != inf) ret.tracker_.update(k, v);
     }
     return ret;
 }

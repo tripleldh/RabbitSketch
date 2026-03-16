@@ -45,7 +45,7 @@ private:
 void swap(ProbMHMaxTracker& a, ProbMHMaxTracker& b) noexcept;
 
 // ── Internal: lazy Fisher-Yates permutation stream ────────────────────────
-// Produces the next element of a random permutation of {0,..,m-1} on demand.
+// SoA (val_ + ver_arr_) for better cache locality when reading version in next().
 class ProbMHPermStream {
 public:
     explicit ProbMHPermStream(uint32_t m);
@@ -57,7 +57,8 @@ private:
     uint32_t m_;
     uint32_t idx_;
     uint32_t ver_;
-    std::unique_ptr<std::pair<uint32_t,uint32_t>[]> pv_;
+    std::unique_ptr<uint32_t[]> val_;     // logical value at position
+    std::unique_ptr<uint32_t[]> ver_arr_; // version stamp
 };
 
 void swap(ProbMHPermStream& a, ProbMHPermStream& b) noexcept;
@@ -116,8 +117,10 @@ public:
     void printSketch() const;
 
 private:
-    // Feed a single 64-bit canonical k-mer hash into ProbMinHash4 update.
     void addHash(uint64_t h);
+    // Internal: same as addHash but takes pre-seeded rng (fmix(canonical,seed)).
+    // Used when caller already computed rng for prefilter to avoid redundant fmix.
+    void addHashFromRng(uint64_t rng);
 
     uint32_t           m_;
     int                kmer_size_;
