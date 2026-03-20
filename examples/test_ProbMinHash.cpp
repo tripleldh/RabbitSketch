@@ -123,7 +123,7 @@ int main(int argc, char* argv[])
 
         Sketch::ProbMinHash4 sk(M, KSIZE, SEED);
         while (kseq_read(ks1) >= 0)
-            sk.update(ks1->seq.s);
+            sk.update(ks1->seq.s, ks1->seq.l);
 
         #pragma omp critical
         {
@@ -145,7 +145,7 @@ int main(int argc, char* argv[])
 
     #pragma omp parallel for num_threads(numThreads) schedule(static)
     for (int i = 0; i < n_actual; i++) {
-        const double* src = vsketches[i].getRegisters().data();
+        const double* src = vsketches[i].getRegisters();
         memcpy(&flat_regs[(size_t)i * m], src, m * sizeof(double));
     }
     { vector<Sketch::ProbMinHash4>().swap(vsketches); }

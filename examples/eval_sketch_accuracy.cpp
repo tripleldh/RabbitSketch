@@ -162,8 +162,8 @@ int main(int argc, char* argv[])
 
         // ── ProbMinHash4 (m=1024, k=21) ───────────────────────────────
         Sketch::ProbMinHash4 pm1(1024, 21, 42), pm2(1024, 21, 42);
-        pm1.update(seq_a.data());
-        pm2.update(seq_b.data());
+        pm1.update(seq_a.data(), seq_length);
+        pm2.update(seq_b.data(), seq_length);
         double pmh_j = pm1.jaccard(pm2);
 
         PairResult& r = results[idx];
