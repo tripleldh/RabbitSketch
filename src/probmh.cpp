@@ -3,12 +3,27 @@
  *
  * Optimizations vs. baseline:
  *  1. Ziggurat exponential distribution  (~5x faster than -log(u))
- *  2. SIMD batched murmur3_fmix hashing  (AVX-512: 8 k-mers at once)
- *  3. Early return in addHash BEFORE perm_.reset()
+ *  2. SIMD batched murmur3_fmix  (AVX-512: 8-lane; scalar fallback otherwise)
+ *  3. Early return in addHashFromRng BEFORE perm_.reset()
  *  4. Cached class members in hot loop locals
- *  5. Global-max pre-filter to skip most addHash calls
- *  6. SIMD Jaccard comparison  (AVX-512 / AVX2 / scalar)
+ *  5. Global-max pre-filter: cur_max loaded once per batch (register), refreshed
+ *     only when addHashFromRng() is actually called (tighter threshold, zero cost
+ *     on pruned lanes)
+ *  6. SIMD Jaccard / merge  (AVX-512 / AVX2 / scalar)
  *  7. PermStream version overflow protection
+ *  8. No strlen() in update(): caller passes length directly
+ *  9. TED parameters packed into TedParam[] (4 arrays → 1, better cache locality)
+ * 10. tracker_ leaves ARE the registers – regs_ eliminated (no duplicate storage)
+ * 11. O(m) build_from_leaves() for copy / merge (was O(m log m))
+ * 12. bool[8] lane_valid array; all-invalid batch skipped via fast OR check
+ * 13. Optional single-fmix fast path: compile with -DPMH_FAST_HASH
+ *
+ * PMH_FAST_HASH notes:
+ *   Default (off): two rounds of murmur3_fmix per k-mer (maximum avalanche).
+ *   When defined:  one round per k-mer (the SIMD-computed hash is reused as
+ *   the RNG seed directly).  Saves ~1 ns/kmer.  Statistical tests (Jaccard
+ *   bias, variance, self-similarity) should be verified on real data before
+ *   enabling in production.
  */
 
 #include "probmh.h"
@@ -313,7 +328,7 @@ static inline double zig_exponential(uint64_t& state) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 static inline double ted_sample(double c1, double c2, double c3,
-                                double /*rate*/, uint64_t& rng) {
+                                uint64_t& rng) {
     double x = wy_uniform(rng) * c1;
     if (x < 1.0) return x;
     while (true) {
@@ -353,8 +368,8 @@ static const uint8_t ENC_LUT[256] = {
 #define PMH_COMP(e)  ((uint8_t)((e) <= 3 ? 3 - (e) : 255))
 #define PMH_VALID(e) ((e) <= 3)
 
-// Reused constant: 2^{-53} for uniform extraction from RNG (avoids repeated division).
 static const double PMH_INV2_53 = 1.0 / (double)(1ULL << 53);
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // swap helpers
@@ -409,6 +424,16 @@ double ProbMHMaxTracker::getMax() const {
     return v_[lastIdx_];
 }
 
+// O(m) bottom-up rebuild of all internal nodes from pre-set leaves.
+// For internal node p, children are at (p-m)*2 and (p-m)*2+1.
+// Both children have indices < p, so left-to-right sweep is correct.
+void ProbMHMaxTracker::build_from_leaves() {
+    for (uint32_t p = m_; p <= lastIdx_; ++p) {
+        const uint32_t l = (p - m_) << 1;
+        v_[p] = std::max(v_[l], v_[l + 1]);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ProbMHPermStream  (Opt #7: overflow-safe version counter)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -445,12 +470,7 @@ uint32_t ProbMHPermStream::next(uint64_t& rng) {
 
 ProbMinHash4::ProbMinHash4(uint32_t m, int kmer_size, uint64_t seed)
     : m_(m), kmer_size_(kmer_size), seed_(seed),
-      regs_(m, std::numeric_limits<double>::infinity()),
-      boundaries_(new double[m - 1]),
-      ted_rate_(new double[m - 1]),
-      ted_c1_(new double[m - 1]),
-      ted_c2_(new double[m - 1]),
-      ted_c3_(new double[m - 1]),
+      ted_params_(new TedParam[m - 1]),
       tracker_(m),
       perm_(m)
 {
@@ -461,58 +481,51 @@ ProbMinHash4::ProbMinHash4(uint32_t m, int kmer_size, uint64_t seed)
     const double firstBoundary = std::log1p(1.0 / static_cast<double>(m - 1));
     firstBoundaryInv_ = 1.0 / firstBoundary;
 
-    auto make_ted = [&](double rate, uint32_t i) {
-        ted_rate_[i] = rate;
-        ted_c1_[i]   = (rate != 0.0) ? std::expm1(rate) / rate : 1.0;
-        ted_c2_[i]   = (rate != 0.0) ? -std::log1p(std::expm1(-rate) * 0.5) / rate : 0.5;
-        ted_c3_[i]   = (rate != 0.0) ? -std::expm1(-rate) / rate : 1.0;
-    };
+    // Index 0: boundary = 1.0, gap unused in delta formula.
+    {
+        const double rate = firstBoundary;
+        ted_params_[0].boundary = 1.0;
+        ted_params_[0].gap      = 1.0;
+        ted_params_[0].c1 = (rate != 0.0) ? std::expm1(rate) / rate : 1.0;
+        ted_params_[0].c2 = (rate != 0.0) ? -std::log1p(std::expm1(-rate) * 0.5) / rate : 0.5;
+        ted_params_[0].c3 = (rate != 0.0) ? -std::expm1(-rate) / rate : 1.0;
+    }
 
-    make_ted(firstBoundary, 0);
-    boundaries_[0] = 1.0;
     double prevBoundary = firstBoundary;
     for (uint32_t i = 1; i < m - 1; ++i) {
-        const double b = std::log1p(static_cast<double>(i + 1) /
-                                    static_cast<double>(m - i - 1));
-        boundaries_[i] = b / firstBoundary;
-        make_ted(b - prevBoundary, i);
+        const double b    = std::log1p(static_cast<double>(i + 1) /
+                                       static_cast<double>(m - i - 1));
+        const double rate = b - prevBoundary;
+        const double bNorm = b / firstBoundary;
+        ted_params_[i].boundary = bNorm;
+        ted_params_[i].gap      = bNorm - ted_params_[i - 1].boundary;
+        ted_params_[i].c1 = (rate != 0.0) ? std::expm1(rate) / rate : 1.0;
+        ted_params_[i].c2 = (rate != 0.0) ? -std::log1p(std::expm1(-rate) * 0.5) / rate : 0.5;
+        ted_params_[i].c3 = (rate != 0.0) ? -std::expm1(-rate) / rate : 1.0;
         prevBoundary = b;
     }
 }
 
 ProbMinHash4::ProbMinHash4(const ProbMinHash4& o)
     : m_(o.m_), kmer_size_(o.kmer_size_), seed_(o.seed_),
-      regs_(o.regs_),
-      boundaries_(new double[o.m_ - 1]),
-      ted_rate_(new double[o.m_ - 1]),
-      ted_c1_(new double[o.m_ - 1]),
-      ted_c2_(new double[o.m_ - 1]),
-      ted_c3_(new double[o.m_ - 1]),
+      ted_params_(new TedParam[o.m_ - 1]),
       firstBoundaryInv_(o.firstBoundaryInv_),
       tracker_(o.m_),
       perm_(o.m_)
 {
-    std::copy(o.boundaries_.get(), o.boundaries_.get() + m_ - 1, boundaries_.get());
-    std::copy(o.ted_rate_.get(),   o.ted_rate_.get()   + m_ - 1, ted_rate_.get());
-    std::copy(o.ted_c1_.get(),     o.ted_c1_.get()     + m_ - 1, ted_c1_.get());
-    std::copy(o.ted_c2_.get(),     o.ted_c2_.get()     + m_ - 1, ted_c2_.get());
-    std::copy(o.ted_c3_.get(),     o.ted_c3_.get()     + m_ - 1, ted_c3_.get());
-    tracker_.reset(std::numeric_limits<double>::infinity());
-    for (uint32_t k = 0; k < m_; ++k)
-        if (regs_[k] != std::numeric_limits<double>::infinity())
-            tracker_.update(k, regs_[k]);
+    std::copy(o.ted_params_.get(), o.ted_params_.get() + m_ - 1,
+              ted_params_.get());
+    // Copy leaves then rebuild internal nodes in O(m) instead of m × update().
+    std::copy(o.tracker_.leaves(), o.tracker_.leaves() + m_,
+              tracker_.leaves());
+    tracker_.build_from_leaves();
 }
 
 ProbMinHash4& ProbMinHash4::operator=(ProbMinHash4 other) {
     std::swap(m_,                other.m_);
     std::swap(kmer_size_,        other.kmer_size_);
     std::swap(seed_,             other.seed_);
-    std::swap(regs_,             other.regs_);
-    std::swap(boundaries_,       other.boundaries_);
-    std::swap(ted_rate_,         other.ted_rate_);
-    std::swap(ted_c1_,           other.ted_c1_);
-    std::swap(ted_c2_,           other.ted_c2_);
-    std::swap(ted_c3_,           other.ted_c3_);
+    std::swap(ted_params_,       other.ted_params_);
     std::swap(firstBoundaryInv_, other.firstBoundaryInv_);
     Sketch::swap(tracker_,       other.tracker_);
     Sketch::swap(perm_,          other.perm_);
@@ -528,37 +541,33 @@ void ProbMinHash4::addHash(uint64_t h) {
 }
 
 void ProbMinHash4::addHashFromRng(uint64_t rng) {
-    // Fast path (~97%): first value is u*c1[0] when u*c1[0]<1.
-    const double u0 = (double)(rng >> 11) * PMH_INV2_53;
-    const double hv0 = u0 * ted_c1_[0];
+    // Fast path (~97%): first sample u*c1[0] < 1.
+    const TedParam& tp0 = ted_params_[0];
+    const double u0  = (double)(rng >> 11) * PMH_INV2_53;
+    const double hv0 = u0 * tp0.c1;
     double hv;
     if (__builtin_expect(hv0 < 1.0, 1))
         hv = hv0;
     else
-        hv = ted_sample(ted_c1_[0], ted_c2_[0], ted_c3_[0], ted_rate_[0], rng);
+        hv = ted_sample(tp0.c1, tp0.c2, tp0.c3, rng);
+
     if (!tracker_.isUpdatePossible(hv)) return;
 
     perm_.reset();
 
     uint32_t i = 1;
     while (tracker_.isUpdatePossible(hv)) {
-        uint32_t k = perm_.next(rng);
-        if (tracker_.update(k, hv))
-            regs_[k] = hv;
-        if (!tracker_.isUpdatePossible(boundaries_[i - 1])) break;
+        tracker_.update(perm_.next(rng), hv);
+        if (!tracker_.isUpdatePossible(ted_params_[i - 1].boundary)) break;
         if (i < m_ - 1) {
-            double delta = (boundaries_[i] - boundaries_[i - 1]) *
-                           ted_sample(ted_c1_[i], ted_c2_[i], ted_c3_[i],
-                                      ted_rate_[i], rng);
-            hv = boundaries_[i - 1] + delta;
+            const TedParam& tp = ted_params_[i];
+            hv = ted_params_[i - 1].boundary +
+                 tp.gap * ted_sample(tp.c1, tp.c2, tp.c3, rng);
         } else {
-            hv = boundaries_[m_ - 2] +
+            hv = ted_params_[m_ - 2].boundary +
                  firstBoundaryInv_ * zig_exponential(rng);
-            if (tracker_.isUpdatePossible(hv)) {
-                uint32_t k2 = perm_.next(rng);
-                if (tracker_.update(k2, hv))
-                    regs_[k2] = hv;
-            }
+            if (tracker_.isUpdatePossible(hv))
+                tracker_.update(perm_.next(rng), hv);
             break;
         }
         ++i;
@@ -566,18 +575,15 @@ void ProbMinHash4::addHashFromRng(uint64_t rng) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// update  (Opt #2: SIMD batch hash, Opt #4: cached locals, Opt #5: global max)
+// update  (Opts #2,4,5,8,12,13)
 // ═══════════════════════════════════════════════════════════════════════════
 
-void ProbMinHash4::update(char* seq) {
-    const uint64_t length = std::strlen(seq);
+void ProbMinHash4::update(const char* seq, uint64_t length) {
     const int K = kmer_size_;
     if (length < static_cast<uint64_t>(K)) return;
 
-    // ── Opt #4: cache class members in locals ────────────────────────────
     const uint64_t loc_seed = seed_;
 
-    // ── Seed the rolling window ──────────────────────────────────────────
     const uint64_t kmer_mask = (K == 32) ? ~0ULL : ((1ULL << (2 * K)) - 1);
     uint64_t fwd = 0, rev = 0;
     int inv = 0;
@@ -589,10 +595,10 @@ void ProbMinHash4::update(char* seq) {
         rev = (rev >> 2) | (static_cast<uint64_t>(er & 3u) << (2 * (K - 1)));
     }
 
-    // ── Opt #2: 8-lane batched hashing (SIMD for murmur3_fmix) ──────────
-    const int      lanes = 8;
-    const uint64_t N_body = length - static_cast<uint64_t>(K);
-    const uint64_t N_batch = (N_body >= 1) ? ((N_body) / lanes) * lanes : 0;
+    const int      lanes    = 8;
+    const uint64_t N_body   = length - static_cast<uint64_t>(K);
+    const uint64_t N_batch  = (N_body >= 1) ? (N_body / lanes) * lanes : 0;
+    const double   loc_c1_0 = ted_params_[0].c1;
 
     for (uint64_t i = 0; i < N_batch; i += lanes) {
         uint64_t resv[8];
@@ -602,7 +608,6 @@ void ProbMinHash4::update(char* seq) {
             uint64_t pos = i + j;
             lane_valid[j] = (inv == 0);
             resv[j] = lane_valid[j] ? ((fwd <= rev) ? fwd : rev) : 0;
-
             uint8_t ef_out = PMH_ENC(seq[pos]);
             uint8_t ef_in  = PMH_ENC(seq[pos + K]);
             if (!PMH_VALID(ef_out)) inv--;
@@ -612,19 +617,23 @@ void ProbMinHash4::update(char* seq) {
             rev = (rev >> 2) | (static_cast<uint64_t>(er_in) << (2 * (K - 1)));
         }
 
-        // ── SIMD hash: 8× murmur3_fmix in parallel ─────────────────────
+        // Skip SIMD hash if every k-mer in this batch contains N.
+        if (!(lane_valid[0]|lane_valid[1]|lane_valid[2]|lane_valid[3]|
+              lane_valid[4]|lane_valid[5]|lane_valid[6]|lane_valid[7])) continue;
+
+        // ── Opt #2: 8-lane batched murmur3_fmix (AVX-512) ───────────────
         uint64_t hashvalv[8];
 #if defined(__AVX512F__) && defined(__AVX512DQ__)
         {
             __m512i vb = _mm512_loadu_si512((const void*)resv);
-            __m512i vs = _mm512_set1_epi64(loc_seed);
+            __m512i vs = _mm512_set1_epi64((int64_t)loc_seed);
             __m512i va = _mm512_xor_epi64(vb, vs);
             __m512i vt = _mm512_srli_epi64(va, 33);
             vb = _mm512_xor_epi64(va, vt);
-            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xff51afd7ed558ccdULL));
+            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xff51afd7ed558ccdLL));
             vt = _mm512_srli_epi64(va, 33);
             vb = _mm512_xor_epi64(va, vt);
-            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xc4ceb9fe1a85ec53ULL));
+            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xc4ceb9fe1a85ec53LL));
             vt = _mm512_srli_epi64(va, 33);
             vb = _mm512_xor_epi64(va, vt);
             _mm512_storeu_si512(hashvalv, vb);
@@ -634,28 +643,39 @@ void ProbMinHash4::update(char* seq) {
             hashvalv[j] = mc::murmur3_fmix(resv[j], loc_seed);
 #endif
 
-        // ── Per-hash: prefilter then addHashFromRng (reuse rng, no second fmix)
-        const double cur_max = tracker_.getMax();
-        const double loc_c1_0 = ted_c1_[0];
+        // ── Opt #5: cur_max loaded once per batch into a register.
+        // Refreshed only when addHashFromRng() is actually invoked, so
+        // later lanes in the same batch benefit from the tighter threshold
+        // without paying a memory load on every pruned lane.
+        double cur_max = tracker_.getMax();
         for (int j = 0; j < lanes; ++j) {
             if (!lane_valid[j]) continue;
-            uint64_t rng_inner = mc::murmur3_fmix(hashvalv[j], seed_);
+#ifdef PMH_FAST_HASH
+            uint64_t rng_inner = hashvalv[j];
+#else
+            uint64_t rng_inner = mc::murmur3_fmix(hashvalv[j], loc_seed);
+#endif
             double hv_fast = (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0;
             if (__builtin_expect(hv_fast < 1.0, 1) && hv_fast >= cur_max) continue;
             addHashFromRng(rng_inner);
+            cur_max = tracker_.getMax();   // refresh after real update attempt
         }
     }
 
     // ── Remainder loop (scalar) ──────────────────────────────────────────
-    const double loc_c1_0_rem = ted_c1_[0];
     for (uint64_t i = N_batch; i <= N_body; ++i) {
         if (inv == 0) {
-            uint64_t canonical = (fwd <= rev) ? fwd : rev;
-            uint64_t h = mc::murmur3_fmix(canonical, loc_seed);
-            uint64_t rng_inner = mc::murmur3_fmix(h, seed_);
-            double hv_fast = (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0_rem;
-            if (__builtin_expect(hv_fast < 1.0, 1) && hv_fast >= tracker_.getMax()) continue;
-            addHashFromRng(rng_inner);
+            const uint64_t canonical = (fwd <= rev) ? fwd : rev;
+#ifdef PMH_FAST_HASH
+            uint64_t rng_inner = mc::murmur3_fmix(canonical, loc_seed);
+#else
+            uint64_t h         = mc::murmur3_fmix(canonical, loc_seed);
+            uint64_t rng_inner = mc::murmur3_fmix(h, loc_seed);
+#endif
+            double hv_fast = (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0;
+            if (!(__builtin_expect(hv_fast < 1.0, 1) &&
+                  hv_fast >= tracker_.getMax()))
+                addHashFromRng(rng_inner);
         }
         if (i < N_body) {
             uint8_t ef_out = PMH_ENC(seq[i]);
@@ -675,8 +695,8 @@ void ProbMinHash4::update(char* seq) {
 
 double ProbMinHash4::jaccard(const ProbMinHash4& other) const {
     assert(m_ == other.m_);
-    const double* __restrict__ a = regs_.data();
-    const double* __restrict__ b = other.regs_.data();
+    const double* __restrict__ a = tracker_.leaves();
+    const double* __restrict__ b = other.tracker_.leaves();
     const double inf = std::numeric_limits<double>::infinity();
     int count = 0;
     uint32_t k = 0;
@@ -713,59 +733,48 @@ double ProbMinHash4::jaccard(const ProbMinHash4& other) const {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// merge / print
+// merge  –  element-wise min; O(m) tracker rebuild (was O(m log m))
 // ═══════════════════════════════════════════════════════════════════════════
 
 ProbMinHash4 ProbMinHash4::merge(const ProbMinHash4& other) const {
     assert(m_ == other.m_ && kmer_size_ == other.kmer_size_);
     ProbMinHash4 ret(m_, kmer_size_, seed_);
-    const double* __restrict__ a = regs_.data();
-    const double* __restrict__ b = other.regs_.data();
-    double* __restrict__ r = ret.regs_.data();
-    const double inf = std::numeric_limits<double>::infinity();
+
+    const double* __restrict__ a = tracker_.leaves();
+    const double* __restrict__ b = other.tracker_.leaves();
+    double*       __restrict__ r = ret.tracker_.leaves();
     uint32_t k = 0;
 
 #if defined(__AVX512F__)
-    {
-        __m512d vinf = _mm512_set1_pd(inf);
-        for (; k + 8 <= m_; k += 8) {
-            __m512d va = _mm512_loadu_pd(a + k);
-            __m512d vb = _mm512_loadu_pd(b + k);
-            __m512d vr = _mm512_min_pd(va, vb);
-            _mm512_storeu_pd(r + k, vr);
-            for (int i = 0; i < 8; ++i) {
-                double v = r[k + i];
-                if (v != inf) ret.tracker_.update(k + i, v);
-            }
-        }
+    for (; k + 8 <= m_; k += 8) {
+        __m512d vr = _mm512_min_pd(_mm512_loadu_pd(a + k),
+                                   _mm512_loadu_pd(b + k));
+        _mm512_storeu_pd(r + k, vr);
     }
 #elif defined(__AVX2__)
-    {
-        __m256d vinf = _mm256_set1_pd(inf);
-        for (; k + 4 <= m_; k += 4) {
-            __m256d va = _mm256_loadu_pd(a + k);
-            __m256d vb = _mm256_loadu_pd(b + k);
-            __m256d vr = _mm256_min_pd(va, vb);
-            _mm256_storeu_pd(r + k, vr);
-            for (int i = 0; i < 4; ++i) {
-                double v = r[k + i];
-                if (v != inf) ret.tracker_.update(k + i, v);
-            }
-        }
+    for (; k + 4 <= m_; k += 4) {
+        __m256d vr = _mm256_min_pd(_mm256_loadu_pd(a + k),
+                                   _mm256_loadu_pd(b + k));
+        _mm256_storeu_pd(r + k, vr);
     }
 #endif
-    for (; k < m_; ++k) {
-        double v = std::min(a[k], b[k]);
-        r[k] = v;
-        if (v != inf) ret.tracker_.update(k, v);
-    }
+    for (; k < m_; ++k)
+        r[k] = std::min(a[k], b[k]);
+
+    // Single O(m) sweep to build the tournament-tree internal nodes.
+    ret.tracker_.build_from_leaves();
     return ret;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// print
+// ═══════════════════════════════════════════════════════════════════════════
+
 void ProbMinHash4::printSketch() const {
+    const double* regs = tracker_.leaves();
     std::fprintf(stdout, "ProbMinHash4 m=%u k=%d regs[0..19]: ", m_, kmer_size_);
     for (uint32_t i = 0; i < m_ && i < 20; ++i)
-        std::fprintf(stdout, "%.4g ", regs_[i]);
+        std::fprintf(stdout, "%.4g ", regs[i]);
     if (m_ > 20) std::fprintf(stdout, "...");
     std::fprintf(stdout, "\n");
 }

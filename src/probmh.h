@@ -5,18 +5,33 @@
  * Algorithms for the (Probability) Jaccard Similarity", IEEE TKDE 2020.
  * https://arxiv.org/abs/1911.00675
  *
+ * Optimizations vs. baseline:
+ *  1. Ziggurat exponential distribution  (~5x faster than -log(u))
+ *  2. SIMD batched murmur3_fmix hashing  (AVX-512: 8-lane; AVX2: 8-lane emulated)
+ *  3. Early return in addHashFromRng BEFORE perm_.reset()
+ *  4. Cached class members in hot loop locals
+ *  5. Global-max pre-filter to skip most addHashFromRng calls
+ *  6. SIMD Jaccard / merge  (AVX-512 / AVX2 / scalar)
+ *  7. PermStream version overflow protection
+ *  8. No strlen(): caller passes length directly (eliminates one full scan)
+ *  9. TED parameters packed into TedParam[] (better cache locality)
+ * 10. tracker_ leaves ARE the sketch registers (no duplicate regs_ storage)
+ * 11. O(m) build_from_leaves() for copy / merge (vs. O(m log m) on-line updates)
+ * 12. cur_max loaded once per batch (register); refreshed only after real update
+ * 13. bool[8] lane_valid; all-N batch skipped via branchless OR check
+ * 14. Optional single-fmix fast path: compile with -DPMH_FAST_HASH
+ *
  * Interface mirrors HyperLogLog / SetSketch in this library:
- *   update(char* seq)  – ingest a DNA/RNA sequence (k-mer rolling hash)
- *   distance(other)    – probability Jaccard distance  [0, 1]
- *   jaccard(other)     – probability Jaccard similarity [0, 1]
- *   merge(other)       – element-wise min merge (returns new sketch)
+ *   update(seq, length) – ingest a DNA/RNA sequence (k-mer rolling hash)
+ *   distance(other)     – probability Jaccard distance  [0, 1]
+ *   jaccard(other)      – probability Jaccard similarity [0, 1]
+ *   merge(other)        – element-wise min merge (returns new sketch)
  */
 
 #ifndef _PROBMH_H_
 #define _PROBMH_H_
 
 #include <cstdint>
-#include <vector>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -27,6 +42,8 @@ namespace Sketch {
 // ── Internal: tournament-tree max-value tracker ───────────────────────────
 // Maintains the current maximum over m registers; isUpdatePossible() lets
 // ProbMinHash4 skip elements that can no longer improve any register.
+// Leaf values (indices 0..m-1) double as the sketch registers themselves,
+// eliminating the need for a separate regs_ array.
 class ProbMHMaxTracker {
 public:
     explicit ProbMHMaxTracker(uint32_t m);
@@ -34,12 +51,22 @@ public:
     bool   update(uint32_t idx, double value);
     bool   isUpdatePossible(double value) const;
     double getMax() const;
+
+    // Direct access to the m leaf values (= sketch registers).
+    double*       leaves()       noexcept { return v_.get(); }
+    const double* leaves() const noexcept { return v_.get(); }
+
+    // O(m) bottom-up rebuild of internal nodes from already-set leaves.
+    // Call after bulk-writing leaves (copy / merge) instead of m individual
+    // update() calls, which would cost O(m log m).
+    void build_from_leaves();
+
     friend void swap(ProbMHMaxTracker& a, ProbMHMaxTracker& b) noexcept;
 
 private:
     uint32_t m_;
     uint32_t lastIdx_;
-    std::unique_ptr<double[]> v_;
+    std::unique_ptr<double[]> v_;   // [0..m-1] leaves, [m..2m-2] internal nodes
 };
 
 void swap(ProbMHMaxTracker& a, ProbMHMaxTracker& b) noexcept;
@@ -85,8 +112,9 @@ public:
      * Ingest a DNA/RNA sequence.
      * Canonical k-mers (forward vs reverse-complement minimum) are used.
      * Can be called multiple times to add more sequences to the same sketch.
+     * The caller must supply the sequence length (avoids an extra strlen pass).
      */
-    void update(char* seq);
+    void update(const char* seq, uint64_t length);
 
     /**
      * Return the probability Jaccard similarity in [0, 1].
@@ -107,9 +135,10 @@ public:
     ProbMinHash4 merge(const ProbMinHash4& other) const;
 
     /**
-     * Return the raw register values (for serialization / external use).
+     * Return pointer to the m raw register values (for serialization / LSH).
+     * The pointer remains valid as long as the sketch is alive and unmodified.
      */
-    const std::vector<double>& getRegisters() const { return regs_; }
+    const double* getRegisters() const noexcept { return tracker_.leaves(); }
 
     int      getKmerSize()  const { return kmer_size_; }
     uint32_t getM()         const { return m_; }
@@ -118,23 +147,23 @@ public:
 
 private:
     void addHash(uint64_t h);
-    // Internal: same as addHash but takes pre-seeded rng (fmix(canonical,seed)).
-    // Used when caller already computed rng for prefilter to avoid redundant fmix.
     void addHashFromRng(uint64_t rng);
+
+    // Packed TED (Truncated-Exponential Distribution) parameters.
+    // Replaces five separate arrays (boundaries_, ted_rate_, ted_c1/c2/c3_)
+    // for better spatial locality: hot-loop accesses stride over one array.
+    struct TedParam {
+        double boundary;  // normalised cumulative boundary; [0] = 1.0
+        double gap;       // boundary[i] - boundary[i-1]; used for delta (i >= 1)
+        double c1, c2, c3;
+    };
 
     uint32_t           m_;
     int                kmer_size_;
     uint64_t           seed_;
 
-    std::vector<double> regs_;          // m_ hash registers (all inf initially)
-
-    // ProbMinHash4 precomputed tables
-    std::unique_ptr<double[]>  boundaries_;          // [m-1]  normalised boundaries
-    std::unique_ptr<double[]>  ted_rate_;            // [m-1]  truncated-exp rates
-    std::unique_ptr<double[]>  ted_c1_;              // [m-1]  (exp(r)-1)/r
-    std::unique_ptr<double[]>  ted_c2_;              // [m-1]
-    std::unique_ptr<double[]>  ted_c3_;              // [m-1]
-    double                     firstBoundaryInv_;    // 1 / log1p(1/(m-1))
+    std::unique_ptr<TedParam[]> ted_params_;     // [m-1]
+    double                      firstBoundaryInv_;
 
     ProbMHMaxTracker   tracker_;
     ProbMHPermStream   perm_;
