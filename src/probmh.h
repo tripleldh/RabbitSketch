@@ -97,10 +97,14 @@ public:
      * @param m         number of sketch registers (sketch size); must be > 1
      * @param kmer_size k-mer length for sequence hashing (default 21)
      * @param seed      64-bit seed for wyhash-based RNG (default 42)
+     * @param max_L     max register updates per element (Route C truncation).
+     *                  0 = unlimited (original ProbMinHash4 behaviour).
+     *                  1/2/4/… = Top-L truncation (faster, slight accuracy loss).
      */
     explicit ProbMinHash4(uint32_t m = 1024,
                           int      kmer_size = 21,
-                          uint64_t seed = 42);
+                          uint64_t seed = 42,
+                          uint32_t max_L = 0);
 
     ~ProbMinHash4() = default;
     ProbMinHash4(const ProbMinHash4&);
@@ -142,6 +146,7 @@ public:
 
     int      getKmerSize()  const { return kmer_size_; }
     uint32_t getM()         const { return m_; }
+    uint32_t getMaxL()      const { return max_L_; }
 
     void printSketch() const;
 
@@ -161,6 +166,7 @@ private:
     uint32_t           m_;
     int                kmer_size_;
     uint64_t           seed_;
+    uint32_t           max_L_;    // Route C: max updates per element (m_ = unlimited)
 
     std::unique_ptr<TedParam[]> ted_params_;     // [m-1]
     double                      firstBoundaryInv_;

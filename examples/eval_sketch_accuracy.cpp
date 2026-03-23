@@ -81,7 +81,8 @@ static void gen_mutant(const char* base, char* out, int len,
 struct PairResult {
     double rate;
     double theo_j32, theo_j21, theo_j20;
-    double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j;
+    double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j, kmv_j;
+    double tl1_j, tl2_j, tl4_j;   // Route C: Top-L truncated ProbMinHash
 };
 
 int main(int argc, char* argv[])
@@ -115,8 +116,8 @@ int main(int argc, char* argv[])
             "  mutation rates: %d levels (%.3f – %.3f)\n"
             "  total pairs   : %d  (%d sequences)\n"
             "  threads       : %d\n"
-            "  sketch sizes  : HLL=1024  SS=1024  MH=1024  PMH=1024  OPH=1024\n"
-            "  k-mer sizes   : HLL=32  SS=32  KSSD=20  MH=21  PMH=21  OPH=21\n\n",
+            "  sketch sizes  : HLL=1024  SS=1024  MH=1024  PMH=1024  OPH=1024  KMV=1024  TL{1,2,4}=1024\n"
+            "  k-mer sizes   : HLL=32  SS=32  KSSD=20  MH=21  PMH=21  OPH=21  KMV=21  TL=21\n\n",
             pairs_per_rate, seq_length, n_rates,
             rates.front(), rates.back(),
             total_pairs, total_pairs * 2, numThreads);
@@ -172,11 +173,33 @@ int main(int argc, char* argv[])
         pm2.update(seq_b.data(), seq_length);
         double pmh_j = pm1.jaccard(pm2);
 
+        // ── Route C: Top-L ProbMinHash (L=1, 2, 4) ─────────────────
+        Sketch::ProbMinHash4 tl1a(1024,21,42,1), tl1b(1024,21,42,1);
+        tl1a.update(seq_a.data(), seq_length);
+        tl1b.update(seq_b.data(), seq_length);
+        double tl1_j = tl1a.jaccard(tl1b);
+
+        Sketch::ProbMinHash4 tl2a(1024,21,42,2), tl2b(1024,21,42,2);
+        tl2a.update(seq_a.data(), seq_length);
+        tl2b.update(seq_b.data(), seq_length);
+        double tl2_j = tl2a.jaccard(tl2b);
+
+        Sketch::ProbMinHash4 tl4a(1024,21,42,4), tl4b(1024,21,42,4);
+        tl4a.update(seq_a.data(), seq_length);
+        tl4b.update(seq_b.data(), seq_length);
+        double tl4_j = tl4a.jaccard(tl4b);
+
         // ── ProbMinHash4OP – One-Permutation (m=1024, k=21) ─────────
         Sketch::ProbMinHash4OP op1(1024, 21, 42), op2(1024, 21, 42);
         op1.update(seq_a.data(), seq_length);
         op2.update(seq_b.data(), seq_length);
         double oph_j = op1.jaccard(op2);
+
+        // ── ProbKMV – bottom-k (k=1024, kmer=21) ───────────────────
+        Sketch::ProbKMV kv1(1024, 21, 42), kv2(1024, 21, 42);
+        kv1.update(seq_a.data(), seq_length);
+        kv2.update(seq_b.data(), seq_length);
+        double kmv_j = kv1.jaccard(kv2);
 
         PairResult& r = results[idx];
         r.rate     = p;
@@ -189,6 +212,10 @@ int main(int argc, char* argv[])
         r.mh_j     = mh_j;
         r.pmh_j    = pmh_j;
         r.oph_j    = oph_j;
+        r.kmv_j    = kmv_j;
+        r.tl1_j    = tl1_j;
+        r.tl2_j    = tl2_j;
+        r.tl4_j    = tl4_j;
     }
 
     double t1 = get_sec();
@@ -197,12 +224,15 @@ int main(int argc, char* argv[])
 
     // ── CSV output ─────────────────────────────────────────────────────────
     printf("rate,theo_j_k32,theo_j_k21,theo_j_k20,"
-           "hll_j,setsketch_j,kssd_j,minhash_j,probmh_j,oneperm_j\n");
+           "hll_j,setsketch_j,kssd_j,minhash_j,probmh_j,oneperm_j,kmv_j,"
+           "topl1_j,topl2_j,topl4_j\n");
     for (int i = 0; i < total_pairs; i++) {
         const PairResult& r = results[i];
-        printf("%.4f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+        printf("%.4f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+               "%.6f,%.6f,%.6f\n",
                r.rate, r.theo_j32, r.theo_j21, r.theo_j20,
-               r.hll_j, r.ss_j, r.kssd_j, r.mh_j, r.pmh_j, r.oph_j);
+               r.hll_j, r.ss_j, r.kssd_j, r.mh_j, r.pmh_j, r.oph_j, r.kmv_j,
+               r.tl1_j, r.tl2_j, r.tl4_j);
     }
 
     // ── Summary table ──────────────────────────────────────────────────────
@@ -237,6 +267,10 @@ int main(int argc, char* argv[])
         double  mh_ae = 0,  mh_se = 0,  mh_bi = 0;
         double pmh_ae = 0, pmh_se = 0, pmh_bi = 0;
         double oph_ae = 0, oph_se = 0, oph_bi = 0;
+        double kmv_ae = 0, kmv_se = 0, kmv_bi = 0;
+        double tl1_ae = 0, tl1_se = 0, tl1_bi = 0;
+        double tl2_ae = 0, tl2_se = 0, tl2_bi = 0;
+        double tl4_ae = 0, tl4_se = 0, tl4_bi = 0;
 
         for (int pi = 0; pi < N; pi++) {
             const PairResult& r = results[ri * N + pi];
@@ -258,12 +292,22 @@ int main(int argc, char* argv[])
 
             double eo = r.oph_j - j21;
             oph_ae += fabs(eo); oph_se += eo * eo; oph_bi += eo;
+
+            double ev = r.kmv_j - j21;
+            kmv_ae += fabs(ev); kmv_se += ev * ev; kmv_bi += ev;
+
+            double e1 = r.tl1_j - j21;
+            tl1_ae += fabs(e1); tl1_se += e1 * e1; tl1_bi += e1;
+            double e2 = r.tl2_j - j21;
+            tl2_ae += fabs(e2); tl2_se += e2 * e2; tl2_bi += e2;
+            double e4 = r.tl4_j - j21;
+            tl4_ae += fabs(e4); tl4_se += e4 * e4; tl4_bi += e4;
         }
 
         fprintf(stderr,
             "%-8.3f │ %.4f  %.4f  %.4f  %+.4f  %.4f  %.4f  %+.4f"
             " │ %.4f  %.4f  %.4f  %+.4f"
-            " │ %.4f  %.4f  %.4f  %+.4f  %.4f  %.4f  %+.4f  %.4f  %.4f  %+.4f\n",
+            " │ %.4f  %.4f  %.4f  %+.4f  %.4f  %.4f  %+.4f  %.4f  %.4f  %+.4f  %.4f  %.4f  %+.4f\n",
             p, j32,
             hll_ae / N, sqrt(hll_se / N), hll_bi / N,
              ss_ae / N, sqrt( ss_se / N),  ss_bi / N,
@@ -272,11 +316,13 @@ int main(int argc, char* argv[])
             j21,
              mh_ae / N, sqrt( mh_se / N),  mh_bi / N,
             pmh_ae / N, sqrt(pmh_se / N), pmh_bi / N,
-            oph_ae / N, sqrt(oph_se / N), oph_bi / N);
+            oph_ae / N, sqrt(oph_se / N), oph_bi / N,
+            kmv_ae / N, sqrt(kmv_se / N), kmv_bi / N);
     }
 
     // ── Global aggregates ──────────────────────────────────────────────────
-    double g_hll = 0, g_ss = 0, g_kd = 0, g_mh = 0, g_pmh = 0, g_oph = 0;
+    double g_hll = 0, g_ss = 0, g_kd = 0, g_mh = 0, g_pmh = 0, g_oph = 0, g_kmv = 0;
+    double g_tl1 = 0, g_tl2 = 0, g_tl4 = 0;
     for (int i = 0; i < total_pairs; i++) {
         int ri = i / pairs_per_rate;
         double j32 = theo_jaccard(rates[ri], 32);
@@ -288,11 +334,44 @@ int main(int argc, char* argv[])
         g_mh  += fabs(results[i].mh_j   - j21);
         g_pmh += fabs(results[i].pmh_j  - j21);
         g_oph += fabs(results[i].oph_j  - j21);
+        g_kmv += fabs(results[i].kmv_j  - j21);
+        g_tl1 += fabs(results[i].tl1_j  - j21);
+        g_tl2 += fabs(results[i].tl2_j  - j21);
+        g_tl4 += fabs(results[i].tl4_j  - j21);
     }
     fprintf(stderr,
-            "\nGlobal MAE:  HLL=%.5f  SetSketch=%.5f  KSSD=%.5f  MinHash=%.5f  ProbMH=%.5f  OnePerm=%.5f\n",
+            "\nGlobal MAE:  HLL=%.5f  SetSketch=%.5f  KSSD=%.5f  MinHash=%.5f  ProbMH=%.5f  OnePerm=%.5f  KMV=%.5f\n",
             g_hll / total_pairs, g_ss / total_pairs, g_kd / total_pairs,
-            g_mh / total_pairs, g_pmh / total_pairs, g_oph / total_pairs);
+            g_mh / total_pairs, g_pmh / total_pairs, g_oph / total_pairs, g_kmv / total_pairs);
+
+    // ── Route C: Top-L tradeoff table ───────────────────────────────────
+    fprintf(stderr,
+            "\n--- Route C: Top-L ProbMinHash Tradeoff (fixed-length) ---\n"
+            "%-8s │ %8s  %8s  %8s  %8s\n",
+            "rate", "ProbMH", "TL-4", "TL-2", "TL-1");
+    fprintf(stderr,
+            "─────────┼─────────────────────────────────────────\n");
+    for (int ri = 0; ri < n_rates; ri++) {
+        double p = rates[ri];
+        int    N = pairs_per_rate;
+        double a_pmh = 0, a_tl4 = 0, a_tl2 = 0, a_tl1 = 0;
+        for (int pi = 0; pi < N; pi++) {
+            const PairResult& r = results[ri * N + pi];
+            double j = theo_jaccard(p, 21);
+            a_pmh += fabs(r.pmh_j - j);
+            a_tl4 += fabs(r.tl4_j - j);
+            a_tl2 += fabs(r.tl2_j - j);
+            a_tl1 += fabs(r.tl1_j - j);
+        }
+        fprintf(stderr, "%-8.3f │ %8.5f  %8.5f  %8.5f  %8.5f\n",
+                p, a_pmh/N, a_tl4/N, a_tl2/N, a_tl1/N);
+    }
+    fprintf(stderr,
+            "─────────┼─────────────────────────────────────────\n"
+            "%-8s │ %8.5f  %8.5f  %8.5f  %8.5f\n",
+            "GLOBAL", g_pmh/total_pairs, g_tl4/total_pairs,
+            g_tl2/total_pairs, g_tl1/total_pairs);
+
     fprintf(stderr, "Fixed-len total time: %.2f s\n", get_sec() - t0);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -313,7 +392,8 @@ int main(int argc, char* argv[])
         double rate;
         int    len_a, len_b;
         double theo_j32, theo_j21, theo_j20;
-        double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j;
+        double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j, kmv_j;
+        double tl1_j, tl2_j, tl4_j;
     };
 
     // Ground-truth Jaccard for unequal-length pairs
@@ -404,9 +484,25 @@ int main(int argc, char* argv[])
         pm1.update(seq_a.data(), La); pm2.update(seq_b.data(), Lb);
         double pmh_j = pm1.jaccard(pm2);
 
+        Sketch::ProbMinHash4 vtl1a(1024,21,42,1), vtl1b(1024,21,42,1);
+        vtl1a.update(seq_a.data(), La); vtl1b.update(seq_b.data(), Lb);
+        double vtl1_j = vtl1a.jaccard(vtl1b);
+
+        Sketch::ProbMinHash4 vtl2a(1024,21,42,2), vtl2b(1024,21,42,2);
+        vtl2a.update(seq_a.data(), La); vtl2b.update(seq_b.data(), Lb);
+        double vtl2_j = vtl2a.jaccard(vtl2b);
+
+        Sketch::ProbMinHash4 vtl4a(1024,21,42,4), vtl4b(1024,21,42,4);
+        vtl4a.update(seq_a.data(), La); vtl4b.update(seq_b.data(), Lb);
+        double vtl4_j = vtl4a.jaccard(vtl4b);
+
         Sketch::ProbMinHash4OP op1(1024, 21, 42), op2(1024, 21, 42);
         op1.update(seq_a.data(), La); op2.update(seq_b.data(), Lb);
         double oph_j = op1.jaccard(op2);
+
+        Sketch::ProbKMV kv1(1024, 21, 42), kv2(1024, 21, 42);
+        kv1.update(seq_a.data(), La); kv2.update(seq_b.data(), Lb);
+        double kmv_j = kv1.jaccard(kv2);
 
         VarPairResult& r = vr[idx];
         r.rate     = p;
@@ -419,6 +515,10 @@ int main(int argc, char* argv[])
         r.mh_j     = mh_j;
         r.pmh_j    = pmh_j;
         r.oph_j    = oph_j;
+        r.kmv_j    = kmv_j;
+        r.tl1_j    = vtl1_j;
+        r.tl2_j    = vtl2_j;
+        r.tl4_j    = vtl4_j;
     }
 
     double t3 = get_sec();
@@ -428,18 +528,23 @@ int main(int argc, char* argv[])
     // ── Variable-length CSV output (stdout) ───────────────────────────────
     printf("\n# === VARIABLE-LENGTH RESULTS (mixed-size pairs) ===\n");
     printf("len_a_bp,len_b_bp,rate,theo_j_k32,theo_j_k21,theo_j_k20,"
-           "hll_j,setsketch_j,kssd_j,minhash_j,probmh_j,oneperm_j\n");
+           "hll_j,setsketch_j,kssd_j,minhash_j,probmh_j,oneperm_j,kmv_j,"
+           "topl1_j,topl2_j,topl4_j\n");
     for (int i = 0; i < total_pairs; i++) {
         const VarPairResult& r = vr[i];
-        printf("%d,%d,%.4f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+        printf("%d,%d,%.4f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+               "%.6f,%.6f,%.6f\n",
                r.len_a, r.len_b, r.rate,
                r.theo_j32, r.theo_j21, r.theo_j20,
-               r.hll_j, r.ss_j, r.kssd_j, r.mh_j, r.pmh_j, r.oph_j);
+               r.hll_j, r.ss_j, r.kssd_j, r.mh_j, r.pmh_j, r.oph_j, r.kmv_j,
+               r.tl1_j, r.tl2_j, r.tl4_j);
     }
 
     // ── Global MAE summary – all lengths mixed (stderr) ───────────────────
-    double v_hll = 0, v_ss = 0, v_kd = 0, v_mh = 0, v_pmh = 0, v_oph = 0;
-    double v_hll_se = 0, v_ss_se = 0, v_kd_se = 0, v_mh_se = 0, v_pmh_se = 0, v_oph_se = 0;
+    double v_hll = 0, v_ss = 0, v_kd = 0, v_mh = 0, v_pmh = 0, v_oph = 0, v_kmv = 0;
+    double v_hll_se = 0, v_ss_se = 0, v_kd_se = 0, v_mh_se = 0, v_pmh_se = 0, v_oph_se = 0, v_kmv_se = 0;
+    double v_tl1 = 0, v_tl2 = 0, v_tl4 = 0;
+    double v_tl1_se = 0, v_tl2_se = 0, v_tl4_se = 0;
     for (int i = 0; i < total_pairs; i++) {
         const VarPairResult& r = vr[i];
         double eh = r.hll_j  - r.theo_j32; v_hll  += fabs(eh); v_hll_se  += eh*eh;
@@ -448,21 +553,40 @@ int main(int argc, char* argv[])
         double em = r.mh_j   - r.theo_j21; v_mh   += fabs(em); v_mh_se   += em*em;
         double ep = r.pmh_j  - r.theo_j21; v_pmh  += fabs(ep); v_pmh_se  += ep*ep;
         double eo = r.oph_j  - r.theo_j21; v_oph  += fabs(eo); v_oph_se  += eo*eo;
+        double ev = r.kmv_j  - r.theo_j21; v_kmv  += fabs(ev); v_kmv_se  += ev*ev;
+        double e1 = r.tl1_j  - r.theo_j21; v_tl1  += fabs(e1); v_tl1_se  += e1*e1;
+        double e2 = r.tl2_j  - r.theo_j21; v_tl2  += fabs(e2); v_tl2_se  += e2*e2;
+        double e4 = r.tl4_j  - r.theo_j21; v_tl4  += fabs(e4); v_tl4_se  += e4*e4;
     }
     double N = (double)total_pairs;
     fprintf(stderr,
         "\n--- Variable-Length Global MAE (all mutation rates, all sizes mixed) ---\n"
-        "%-10s │ %8s %9s %8s %8s %8s %8s\n",
-        "metric", "HLL", "SetSketch", "KSSD", "MinHash", "ProbMH", "OnePerm");
+        "%-10s │ %8s %9s %8s %8s %8s %8s %8s\n",
+        "metric", "HLL", "SetSketch", "KSSD", "MinHash", "ProbMH", "OnePerm", "KMV");
     fprintf(stderr,
-        "───────────┼────────────────────────────────────────────────────────────────\n");
+        "───────────┼──────────────────────────────────────────────────────────────────────────\n");
     fprintf(stderr,
-        "%-10s │ %8.5f %9.5f %8.5f %8.5f %8.5f %8.5f\n", "MAE",
-        v_hll/N, v_ss/N, v_kd/N, v_mh/N, v_pmh/N, v_oph/N);
+        "%-10s │ %8.5f %9.5f %8.5f %8.5f %8.5f %8.5f %8.5f\n", "MAE",
+        v_hll/N, v_ss/N, v_kd/N, v_mh/N, v_pmh/N, v_oph/N, v_kmv/N);
     fprintf(stderr,
-        "%-10s │ %8.5f %9.5f %8.5f %8.5f %8.5f %8.5f\n", "RMSE",
+        "%-10s │ %8.5f %9.5f %8.5f %8.5f %8.5f %8.5f %8.5f\n", "RMSE",
         sqrt(v_hll_se/N), sqrt(v_ss_se/N), sqrt(v_kd_se/N),
-        sqrt(v_mh_se/N), sqrt(v_pmh_se/N), sqrt(v_oph_se/N));
+        sqrt(v_mh_se/N), sqrt(v_pmh_se/N), sqrt(v_oph_se/N), sqrt(v_kmv_se/N));
+
+    // ── Route C: Variable-length Top-L tradeoff table ───────────────────
+    fprintf(stderr,
+            "\n--- Route C: Top-L ProbMinHash Tradeoff (variable-length) ---\n"
+            "%-10s │ %8s  %8s  %8s  %8s\n",
+            "metric", "ProbMH", "TL-4", "TL-2", "TL-1");
+    fprintf(stderr,
+            "───────────┼─────────────────────────────────────────\n");
+    fprintf(stderr,
+            "%-10s │ %8.5f  %8.5f  %8.5f  %8.5f\n", "MAE",
+            v_pmh/N, v_tl4/N, v_tl2/N, v_tl1/N);
+    fprintf(stderr,
+            "%-10s │ %8.5f  %8.5f  %8.5f  %8.5f\n", "RMSE",
+            sqrt(v_pmh_se/N), sqrt(v_tl4_se/N), sqrt(v_tl2_se/N), sqrt(v_tl1_se/N));
+
     fprintf(stderr, "\nVarLen total time: %.2f s\n", get_sec() - t2);
 
     return 0;

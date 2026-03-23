@@ -468,8 +468,10 @@ uint32_t ProbMHPermStream::next(uint64_t& rng) {
 // ProbMinHash4  –  constructor / copy / assign
 // ═══════════════════════════════════════════════════════════════════════════
 
-ProbMinHash4::ProbMinHash4(uint32_t m, int kmer_size, uint64_t seed)
+ProbMinHash4::ProbMinHash4(uint32_t m, int kmer_size, uint64_t seed,
+                           uint32_t max_L)
     : m_(m), kmer_size_(kmer_size), seed_(seed),
+      max_L_((max_L == 0) ? m : std::min(max_L, m)),
       ted_params_(new TedParam[m - 1]),
       tracker_(m),
       perm_(m)
@@ -508,6 +510,7 @@ ProbMinHash4::ProbMinHash4(uint32_t m, int kmer_size, uint64_t seed)
 
 ProbMinHash4::ProbMinHash4(const ProbMinHash4& o)
     : m_(o.m_), kmer_size_(o.kmer_size_), seed_(o.seed_),
+      max_L_(o.max_L_),
       ted_params_(new TedParam[o.m_ - 1]),
       firstBoundaryInv_(o.firstBoundaryInv_),
       tracker_(o.m_),
@@ -525,6 +528,7 @@ ProbMinHash4& ProbMinHash4::operator=(ProbMinHash4 other) {
     std::swap(m_,                other.m_);
     std::swap(kmer_size_,        other.kmer_size_);
     std::swap(seed_,             other.seed_);
+    std::swap(max_L_,            other.max_L_);
     std::swap(ted_params_,       other.ted_params_);
     std::swap(firstBoundaryInv_, other.firstBoundaryInv_);
     Sketch::swap(tracker_,       other.tracker_);
@@ -555,9 +559,12 @@ void ProbMinHash4::addHashFromRng(uint64_t rng) {
 
     perm_.reset();
 
+    const uint32_t L = max_L_;     // Route C: truncation limit
+    uint32_t updates = 0;
     uint32_t i = 1;
     while (tracker_.isUpdatePossible(hv)) {
         tracker_.update(perm_.next(rng), hv);
+        if (++updates >= L) break;                                  // ← Top-L
         if (!tracker_.isUpdatePossible(ted_params_[i - 1].boundary)) break;
         if (i < m_ - 1) {
             const TedParam& tp = ted_params_[i];
@@ -566,7 +573,7 @@ void ProbMinHash4::addHashFromRng(uint64_t rng) {
         } else {
             hv = ted_params_[m_ - 2].boundary +
                  firstBoundaryInv_ * zig_exponential(rng);
-            if (tracker_.isUpdatePossible(hv))
+            if (updates < L && tracker_.isUpdatePossible(hv))       // ← Top-L
                 tracker_.update(perm_.next(rng), hv);
             break;
         }
