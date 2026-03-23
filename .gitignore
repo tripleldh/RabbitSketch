@@ -7,3 +7,5 @@ examples/res_dir
 pybind11
 ../pybind
 shuf_file/*
+examples/shuf_file/
+examples/233
