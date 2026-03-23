@@ -169,6 +169,139 @@ private:
     ProbMHPermStream   perm_;
 };
 
+// ── One-Permutation ProbMinHash (Route A) ──────────────────────────────────
+//
+// Each element maps to exactly ONE bucket via b(x) = hash1(x) % m, with a
+// single key g(x) = Uniform(0,1) from hash2(x).  Each register keeps the
+// minimum key:  S_j = min_{x: b(x)=j} g(x).
+//
+// Compared to ProbMinHash4:
+//   • No PermStream (eliminated perm_.reset() / perm_.next())
+//   • No MaxTracker tournament tree (flat array + scalar global_max)
+//   • No TED sampling; one Uniform(0,1) per element
+//   • O(1) per-element update (vs O(log m) tree + permutation)
+//   • global_max pre-filter rejects ~99%+ elements after warm-up
+//
+// Trade-offs:
+//   • Empty buckets possible when #elements < m  (rare for genomic data)
+//   • Jaccard estimator uses count(A[j]==B[j] && finite) / m
+//   • Statistical distribution differs from original ProbMinHash
+//
+class ProbMinHash4OP {
+public:
+    explicit ProbMinHash4OP(uint32_t m = 1024,
+                            int      kmer_size = 21,
+                            uint64_t seed = 42);
+
+    ~ProbMinHash4OP() = default;
+    ProbMinHash4OP(const ProbMinHash4OP&);
+    ProbMinHash4OP& operator=(ProbMinHash4OP other);
+    ProbMinHash4OP(ProbMinHash4OP&&) = default;
+    ProbMinHash4OP& operator=(ProbMinHash4OP&&) = default;
+
+    void update(const char* seq, uint64_t length);
+
+    double jaccard(const ProbMinHash4OP& other) const;
+
+    double distance(const ProbMinHash4OP& other) const {
+        return 1.0 - jaccard(other);
+    }
+
+    ProbMinHash4OP merge(const ProbMinHash4OP& other) const;
+
+    const double* getRegisters() const noexcept { return regs_.get(); }
+    uint32_t getM()        const { return m_; }
+    int      getKmerSize() const { return kmer_size_; }
+    uint32_t numEmpty()    const;
+
+    void printSketch() const;
+
+private:
+    void addHash(uint64_t h);
+    void refreshMax();
+
+    uint32_t m_;
+    int      kmer_size_;
+    uint64_t seed_;
+
+    std::unique_ptr<double[]> regs_;
+    double   global_max_;
+    uint32_t num_nonempty_;
+};
+
+// ── ProbKMV (Route B) ──────────────────────────────────────────────────────
+//
+// For each element x, generate a single key g(x) = Uniform(0,1) from
+// hash(x), then keep the k smallest keys across all elements:
+//
+//     sketch(A) = bottom-k { g(x) : x ∈ A }
+//
+// This is a KMV (K Minimum Values) structure driven by ProbMinHash-style
+// hashing.  The Jaccard estimator uses the standard KMV two-pointer merge:
+//
+//     J ≈ |S_A ∩ S_B in bottom-k of S_A ∪ S_B| / k
+//
+// Compared to ProbMinHash4 / ProbMinHash4OP:
+//   • Structure is a sorted double[k] array (bottom-k values)
+//   • No per-bucket partitioning; no empty-bucket problem
+//   • Merge = sorted merge of two bottom-k lists → take k smallest
+//   • Jaccard = intersection-over-union in merged bottom-k
+//   • One hash per element (no bucket hash needed)
+//   • Naturally deduplicates repeated k-mers
+//
+// Trade-offs:
+//   • Insertion is O(k) worst-case (binary search + memmove), but the
+//     threshold pre-filter rejects >99% of elements after warm-up
+//   • LSH banding on sorted values is less effective than register-based
+//   • This is a KMV sketch, not ProbMinHash proper
+//
+class ProbKMV {
+public:
+    explicit ProbKMV(uint32_t k = 1024,
+                     int      kmer_size = 21,
+                     uint64_t seed = 42);
+
+    ~ProbKMV() = default;
+    ProbKMV(const ProbKMV&);
+    ProbKMV& operator=(ProbKMV other);
+    ProbKMV(ProbKMV&&) = default;
+    ProbKMV& operator=(ProbKMV&&) = default;
+
+    void update(const char* seq, uint64_t length);
+
+    /**
+     * KMV Jaccard estimator: merge the two sorted bottom-k lists, take
+     * the k smallest distinct values, and count how many are shared.
+     */
+    double jaccard(const ProbKMV& other) const;
+
+    double distance(const ProbKMV& other) const {
+        return 1.0 - jaccard(other);
+    }
+
+    ProbKMV merge(const ProbKMV& other) const;
+
+    const double* getRegisters() const noexcept { return vals_.get(); }
+    uint32_t getK()        const { return k_; }
+    uint32_t getM()        const { return k_; }
+    int      getKmerSize() const { return kmer_size_; }
+    uint32_t size()        const { return size_; }
+
+    void printSketch() const;
+
+private:
+    void addHash(uint64_t h);
+    void insertKey(double key);
+
+    uint32_t k_;
+    int      kmer_size_;
+    uint64_t seed_;
+
+    std::unique_ptr<double[]> vals_;   // sorted ascending, [size_..k_) = +inf
+    uint32_t size_;                    // number of filled slots
+    double   threshold_;               // vals_[k_-1] (or +inf during warm-up)
+};
+
 } // namespace Sketch
 
 #endif // _PROBMH_H_

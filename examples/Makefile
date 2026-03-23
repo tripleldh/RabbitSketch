@@ -3,7 +3,7 @@ LIBS=../build/lib
 CXX=g++
 CXXFLAGS=-g -O2 -std=c++14 -fopenmp -fPIC -march=native -I $(INCLUDE)
 
-all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main exe_test_ProbMinHash exe_eval_sketch_acc
+all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main exe_test_ProbMinHash exe_test_OneProbMinHash exe_eval_sketch_acc
 
 exe_test_HLL: test_HLL.cpp
 	$(CXX) $(CXXFLAGS) test_HLL.cpp -o exe_test_HLL -lz -lrabbitsketch_static -L $(LIBS)
@@ -29,8 +29,11 @@ exe_main: main.cpp
 exe_test_ProbMinHash: test_ProbMinHash.cpp ../src/probmh.cpp
 	$(CXX) $(CXXFLAGS) -I ../src test_ProbMinHash.cpp ../src/probmh.cpp -o exe_test_ProbMinHash -lz -lrabbitsketch_static -L $(LIBS)
 
-exe_eval_sketch_acc: eval_sketch_accuracy.cpp ../src/probmh.cpp
-	$(CXX) $(CXXFLAGS) -I ../src eval_sketch_accuracy.cpp ../src/probmh.cpp -o exe_eval_sketch_acc -lz -lrabbitsketch_static -L $(LIBS)
+exe_test_OneProbMinHash: test_OneProbMinHash.cpp ../src/probmh_op.cpp
+	$(CXX) $(CXXFLAGS) -I ../src test_OneProbMinHash.cpp ../src/probmh_op.cpp -o exe_test_OneProbMinHash -lz -lrabbitsketch_static -L $(LIBS)
+
+exe_eval_sketch_acc: eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp
+	$(CXX) $(CXXFLAGS) -I ../src eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp -o exe_eval_sketch_acc -lz -lrabbitsketch_static -L $(LIBS)
 
 clean:
 	rm -f *.o exe_*
