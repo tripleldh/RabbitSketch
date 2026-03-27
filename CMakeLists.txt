@@ -9,6 +9,7 @@ option(CXXAPI "build pure c++ library instead of python bind interface" OFF)
 include_directories(src)
 
 aux_source_directory(src DIR_SRCS)
+list(REMOVE_ITEM DIR_SRCS "src/treeminhash.cpp")
 
 #linux only 
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -static-libstdc++ -march=native")
@@ -22,6 +23,11 @@ if (CXXAPI)
 	add_compile_options(-DNOPYTHON)
 	add_library("${PROJECT_NAME}" SHARED ${DIR_SRCS})
 	add_library("${PROJECT_NAME}_static" STATIC ${DIR_SRCS})
+	file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+	add_custom_command(TARGET "${PROJECT_NAME}_static" POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"$<TARGET_FILE:${PROJECT_NAME}_static>"
+			"${CMAKE_BINARY_DIR}/lib/")
 	
   
 	#set_target_properties("${PROJECT_NAME}_dynamic" PROPERTIES OUTPUT_NAME ${PROJECT_NAME})

@@ -1,45 +1,46 @@
 INCLUDE=../build/include
-LIBS=../build/lib
+# CMake places librabbitsketch_static.a in ../build; shared lib is under ../build/lib
+RABBIT_LIBDIRS=-L../build/lib -L../build
 CXX=g++
 CXXFLAGS=-g -O2 -std=c++14 -fopenmp -fPIC -march=native -I $(INCLUDE)
 
-all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_ProbKMV exe_test_TopLProbMinHash exe_eval_sketch_acc
+all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_ProbKMV exe_test_TopLProbMinHash  exe_eval_sketch_acc
 
 exe_test_HLL: test_HLL.cpp
-	$(CXX) $(CXXFLAGS) test_HLL.cpp -o exe_test_HLL -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) test_HLL.cpp -o exe_test_HLL $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_test_SetSketch: test_SetSketch.cpp
-	$(CXX) $(CXXFLAGS) test_SetSketch.cpp -o exe_test_SetSketch -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) test_SetSketch.cpp -o exe_test_SetSketch $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_test_Kssd: test_Kssd.cpp
-	$(CXX) $(CXXFLAGS) test_Kssd.cpp -o exe_test_Kssd -lz -lrabbitsketch_static -L $(LIBS) 
+	$(CXX) $(CXXFLAGS) test_Kssd.cpp -o exe_test_Kssd $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static 
 
 exe_test_MinHash: test_MinHash.cpp
-	$(CXX) $(CXXFLAGS) test_MinHash.cpp  -o exe_test_MinHash -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) test_MinHash.cpp  -o exe_test_MinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_test_OMH: test_OMH.cpp
-	$(CXX) $(CXXFLAGS) test_OMH.cpp -o exe_test_OMH -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) test_OMH.cpp -o exe_test_OMH $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_generate_shuf_file: generate_shuf_file.cpp
-	$(CXX) $(CXXFLAGS) generate_shuf_file.cpp -o exe_generate_shuf_file -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) generate_shuf_file.cpp -o exe_generate_shuf_file $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_main: main.cpp
-	$(CXX) $(CXXFLAGS) main.cpp -o exe_main -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) main.cpp -o exe_main $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_test_ProbMinHash: test_ProbMinHash.cpp ../src/probmh.cpp
-	$(CXX) $(CXXFLAGS) -I ../src test_ProbMinHash.cpp ../src/probmh.cpp -o exe_test_ProbMinHash -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) -I ../src test_ProbMinHash.cpp ../src/probmh.cpp -o exe_test_ProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_test_OneProbMinHash: test_OneProbMinHash.cpp ../src/probmh_op.cpp
-	$(CXX) $(CXXFLAGS) -I ../src test_OneProbMinHash.cpp ../src/probmh_op.cpp -o exe_test_OneProbMinHash -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) -I ../src test_OneProbMinHash.cpp ../src/probmh_op.cpp -o exe_test_OneProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_test_ProbKMV: test_ProbKMV.cpp ../src/probkmv.cpp
-	$(CXX) $(CXXFLAGS) -I ../src test_ProbKMV.cpp ../src/probkmv.cpp -o exe_test_ProbKMV -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) -I ../src test_ProbKMV.cpp ../src/probkmv.cpp -o exe_test_ProbKMV $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_test_TopLProbMinHash: test_TopLProbMinHash.cpp ../src/probmh.cpp
-	$(CXX) $(CXXFLAGS) -I ../src test_TopLProbMinHash.cpp ../src/probmh.cpp -o exe_test_TopLProbMinHash -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) -I ../src test_TopLProbMinHash.cpp ../src/probmh.cpp -o exe_test_TopLProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_eval_sketch_acc: eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/probkmv.cpp
-	$(CXX) $(CXXFLAGS) -I ../src eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/probkmv.cpp -o exe_eval_sketch_acc -lz -lrabbitsketch_static -L $(LIBS)
+	$(CXX) $(CXXFLAGS) -I ../src eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/probkmv.cpp -o exe_eval_sketch_acc $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 clean:
 	rm -f *.o exe_*
