@@ -242,13 +242,18 @@ private:
 //
 //     sketch(A) = bottom-k { g(x) : x ∈ A }
 //
-// This is a KMV (K Minimum Values) structure driven by ProbMinHash-style
-// hashing.  The Jaccard estimator uses the standard KMV two-pointer merge:
+// This is a KMV (K Minimum Values) structure: canonical k-mers are hashed with
+// MurmurHash3_x64_128 (8-byte key, lower 64 bits → [0,1); same family as MinHash).
+// Optional -DPMH_FAST_HASH uses one round instead of two.  Jaccard uses the
+// standard KMV two-pointer merge:
 //
 //     J ≈ |S_A ∩ S_B in bottom-k of S_A ∪ S_B| / k
 //
 // Compared to ProbMinHash4 / ProbMinHash4OP:
-//   • Structure is a sorted double[k] array (bottom-k values)
+//   • Structure is a sorted uint64_t[k] array (bottom-k integer keys)
+//   • Keys are 53-bit unsigned integers (h >> 11), order-equivalent to
+//     the [0,1) double representation; all comparisons stay in integer
+//     domain (no FP conversions in insert, jaccard, or threshold filter)
 //   • No per-bucket partitioning; no empty-bucket problem
 //   • Merge = sorted merge of two bottom-k lists → take k smallest
 //   • Jaccard = intersection-over-union in merged bottom-k
@@ -263,6 +268,8 @@ private:
 //
 class ProbKMV {
 public:
+    static constexpr uint64_t KEY_MAX = (UINT64_C(1) << 53) - 1;
+
     explicit ProbKMV(uint32_t k = 1024,
                      int      kmer_size = 21,
                      uint64_t seed = 42);
@@ -287,7 +294,7 @@ public:
 
     ProbKMV merge(const ProbKMV& other) const;
 
-    const double* getRegisters() const noexcept { return vals_.get(); }
+    const uint64_t* getRegisters() const noexcept { return vals_.get(); }
     uint32_t getK()        const { return k_; }
     uint32_t getM()        const { return k_; }
     int      getKmerSize() const { return kmer_size_; }
@@ -297,15 +304,15 @@ public:
 
 private:
     void addHash(uint64_t h);
-    void insertKey(double key);
+    void insertKey(uint64_t key);
 
     uint32_t k_;
     int      kmer_size_;
     uint64_t seed_;
 
-    std::unique_ptr<double[]> vals_;   // sorted ascending, [size_..k_) = +inf
-    uint32_t size_;                    // number of filled slots
-    double   threshold_;               // vals_[k_-1] (or +inf during warm-up)
+    std::unique_ptr<uint64_t[]> vals_;  // sorted ascending, [size_..k_) = UINT64_MAX
+    uint32_t size_;                     // number of filled slots
+    uint64_t threshold_;                // vals_[k_-1] (or UINT64_MAX during warm-up)
 };
 
 } // namespace Sketch

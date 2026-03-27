@@ -37,16 +37,15 @@ KSEQ_INIT(gzFile, gzread)
 // KMV Jaccard on two sorted flat arrays of size k.
 // Two-pointer merge: walk the k smallest distinct values from the union,
 // count how many appear in both.
-static inline double flat_kmv_jaccard(const double* __restrict__ a,
-                                      const double* __restrict__ b,
+static inline double flat_kmv_jaccard(const uint64_t* __restrict__ a,
+                                      const uint64_t* __restrict__ b,
                                       int k)
 {
-    const double inf = numeric_limits<double>::infinity();
     int ia = 0, ib = 0;
     int distinct = 0, common = 0;
 
     while (distinct < k && ia < k && ib < k) {
-        if (a[ia] >= inf && b[ib] >= inf) break;
+        if (a[ia] == UINT64_MAX && b[ib] == UINT64_MAX) break;
         if (a[ia] == b[ib]) {
             ++common; ++distinct; ++ia; ++ib;
         } else if (a[ia] < b[ib]) {
@@ -55,8 +54,8 @@ static inline double flat_kmv_jaccard(const double* __restrict__ a,
             ++distinct; ++ib;
         }
     }
-    while (distinct < k && ia < k && a[ia] < inf) { ++distinct; ++ia; }
-    while (distinct < k && ib < k && b[ib] < inf) { ++distinct; ++ib; }
+    while (distinct < k && ia < k && a[ia] != UINT64_MAX) { ++distinct; ++ia; }
+    while (distinct < k && ib < k && b[ib] != UINT64_MAX) { ++distinct; ++ib; }
 
     return (distinct > 0) ? (double)common / (double)distinct : 0.0;
 }
@@ -131,12 +130,12 @@ int main(int argc, char* argv[])
              << "  min=" << min_fill << " / " << K << endl;
     }
 
-    vector<double> flat_regs((size_t)n_actual * m);
+    vector<uint64_t> flat_regs((size_t)n_actual * m);
 
     #pragma omp parallel for num_threads(numThreads) schedule(static)
     for (int i = 0; i < n_actual; i++) {
-        const double* src = vsketches[i].getRegisters();
-        memcpy(&flat_regs[(size_t)i * m], src, m * sizeof(double));
+        const uint64_t* src = vsketches[i].getRegisters();
+        memcpy(&flat_regs[(size_t)i * m], src, m * sizeof(uint64_t));
     }
     { vector<Sketch::ProbKMV>().swap(vsketches); }
 
@@ -149,10 +148,10 @@ int main(int argc, char* argv[])
     const int BANDS = 128;
     const int ROWS  = m / BANDS;
 
-    auto band_hash = [&](const double* data, int rows) -> uint32_t {
+    auto band_hash = [&](const uint64_t* data, int rows) -> uint32_t {
         uint32_t h = 2166136261u;
         const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
-        for (int i = 0; i < rows * (int)sizeof(double); i++) {
+        for (int i = 0; i < rows * (int)sizeof(uint64_t); i++) {
             h ^= p[i];
             h *= 16777619u;
         }
@@ -162,7 +161,7 @@ int main(int argc, char* argv[])
     vector<pair<uint64_t,int>> band_entries((size_t)n_actual * BANDS);
     #pragma omp parallel for num_threads(numThreads) schedule(static)
     for (int i = 0; i < n_actual; i++) {
-        const double* regs = &flat_regs[(size_t)i * m];
+        const uint64_t* regs = &flat_regs[(size_t)i * m];
         for (int b = 0; b < BANDS; b++) {
             uint32_t h = band_hash(regs + b * ROWS, ROWS);
             band_entries[(size_t)i * BANDS + b] =
@@ -262,8 +261,8 @@ int main(int argc, char* argv[])
         }
 
         cnt_exact++;
-        const double* ra = &flat_regs[(size_t)i * m];
-        const double* rb = &flat_regs[(size_t)j * m];
+        const uint64_t* ra = &flat_regs[(size_t)i * m];
+        const uint64_t* rb = &flat_regs[(size_t)j * m];
         double jaccard = flat_kmv_jaccard(ra, rb, m);
         double dist    = 1.0 - jaccard;
 
