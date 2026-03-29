@@ -11,9 +11,13 @@ include_directories(src)
 aux_source_directory(src DIR_SRCS)
 list(REMOVE_ITEM DIR_SRCS "src/treeminhash.cpp")
 
+# LTO requires gcc-ar / gcc-ranlib for static archives
+set(CMAKE_AR "gcc-ar")
+set(CMAKE_RANLIB "gcc-ranlib")
+
 #linux only 
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -static-libstdc++ -march=native")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -fopenmp -march=native -fPIC")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g1 -std=c++14 -fopenmp -march=native -fPIC -DNDEBUG -flto -funroll-loops")
 
 #set flags for specific files
 #set_source_files_properties(src/MinHash.cpp PROPERTIES COMPILE_FLAGS -mavx2)

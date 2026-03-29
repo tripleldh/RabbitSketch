@@ -2,7 +2,7 @@ INCLUDE=../build/include
 # CMake places librabbitsketch_static.a in ../build; shared lib is under ../build/lib
 RABBIT_LIBDIRS=-L../build/lib -L../build
 CXX=g++
-CXXFLAGS=-g -O2 -std=c++14 -fopenmp -fPIC -march=native -I $(INCLUDE)
+CXXFLAGS=-g1 -O3 -std=c++14 -fopenmp -march=native -DNDEBUG -flto -funroll-loops -I $(INCLUDE)
 
 all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_ProbKMV exe_test_TopLProbMinHash  exe_eval_sketch_acc
 

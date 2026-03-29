@@ -261,9 +261,11 @@ private:
 //   • Naturally deduplicates repeated k-mers
 //
 // Trade-offs:
-//   • Insertion is O(k) worst-case (binary search + memmove), but the
-//     threshold pre-filter rejects >99% of elements after warm-up
-//   • LSH banding on sorted values is less effective than register-based
+//   • Warmup: O(1) append into 2k buffer; first compactify sorts,
+//     deduplicates, and truncates to sorted bottom-k.
+//   • Steady state: sorted array with O(log k) binary_search + O(k)
+//     memmove — identical to original, hardware-optimised path.
+//   • Threshold pre-filter rejects >99% of elements after warm-up
 //   • This is a KMV sketch, not ProbMinHash proper
 //
 class ProbKMV {
@@ -294,25 +296,29 @@ public:
 
     ProbKMV merge(const ProbKMV& other) const;
 
-    const uint64_t* getRegisters() const noexcept { return vals_.get(); }
+    const uint64_t* getRegisters() const { ensureSorted(); return vals_.get(); }
     uint32_t getK()        const { return k_; }
     uint32_t getM()        const { return k_; }
     int      getKmerSize() const { return kmer_size_; }
-    uint32_t size()        const { return size_; }
+    uint32_t size()        const { ensureSorted(); return size_; }
 
     void printSketch() const;
 
 private:
     void addHash(uint64_t h);
     void insertKey(uint64_t key);
+    void compactify() const;
+    void ensureSorted() const;
 
     uint32_t k_;
     int      kmer_size_;
     uint64_t seed_;
+    uint32_t buf_cap_;
 
-    std::unique_ptr<uint64_t[]> vals_;  // sorted ascending, [size_..k_) = UINT64_MAX
-    uint32_t size_;                     // number of filled slots
-    uint64_t threshold_;                // vals_[k_-1] (or UINT64_MAX during warm-up)
+    std::unique_ptr<uint64_t[]> vals_;
+    mutable uint32_t size_;
+    mutable uint64_t threshold_;
+    mutable bool     sorted_;
 };
 
 } // namespace Sketch
