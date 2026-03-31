@@ -62,6 +62,17 @@ static inline uint64_t rol64(uint64_t x, unsigned n) {
     return (x << n) | (x >> ((64 - n) & 63));
 }
 
+#ifdef __AVX2__
+static inline __m256i avx2_mullo_epi64(__m256i a, __m256i b) {
+    __m256i a_hi  = _mm256_srli_epi64(a, 32);
+    __m256i b_hi  = _mm256_srli_epi64(b, 32);
+    __m256i lo_lo = _mm256_mul_epu32(a, b);
+    __m256i cross = _mm256_add_epi64(_mm256_mul_epu32(a_hi, b),
+                                      _mm256_mul_epu32(a, b_hi));
+    return _mm256_add_epi64(lo_lo, _mm256_slli_epi64(cross, 32));
+}
+#endif
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ProbKMV  –  constructor / copy / assign
 // ═══════════════════════════════════════════════════════════════════════════
@@ -248,6 +259,12 @@ void ProbKMV::update(const char* seq, uint64_t length) {
     const __m512i vc1 = _mm512_set1_epi64(0xff51afd7ed558ccdLL);
     const __m512i vc2 = _mm512_set1_epi64(0xc4ceb9fe1a85ec53LL);
     __m512i vthresh = _mm512_set1_epi64((int64_t)threshold_);
+#elif defined(__AVX2__)
+    const __m256i vs  = _mm256_set1_epi64x((long long)loc_seed);
+    const __m256i vc1 = _mm256_set1_epi64x(0xff51afd7ed558ccdLL);
+    const __m256i vc2 = _mm256_set1_epi64x(0xc4ceb9fe1a85ec53LL);
+    const __m256i vsign = _mm256_set1_epi64x((long long)0x8000000000000000ULL);
+    __m256i vthresh = _mm256_set1_epi64x((long long)threshold_);
 #endif
 
     for (uint64_t i = 0; i < N_batch; i += lanes) {
@@ -313,6 +330,51 @@ void ProbKMV::update(const char* seq, uint64_t length) {
                 insertKey(keyv[j]);
             }
             vthresh = _mm512_set1_epi64((int64_t)threshold_);
+        }
+#elif defined(__AVX2__)
+        for (int half = 0; half < 2; ++half) {
+            const int base = half * 4;
+            if (!(lane_valid[base]|lane_valid[base+1]|lane_valid[base+2]|lane_valid[base+3]))
+                continue;
+
+            __m256i vb = _mm256_loadu_si256((const __m256i*)(resv + base));
+            __m256i va = _mm256_xor_si256(vb, vs);
+            __m256i vt = _mm256_srli_epi64(va, 33);
+            vb = _mm256_xor_si256(va, vt);
+            va = avx2_mullo_epi64(vb, vc1);
+            vt = _mm256_srli_epi64(va, 33);
+            vb = _mm256_xor_si256(va, vt);
+            va = avx2_mullo_epi64(vb, vc2);
+            vt = _mm256_srli_epi64(va, 33);
+            vb = _mm256_xor_si256(va, vt);
+
+#ifndef PMH_FAST_HASH
+            va = _mm256_xor_si256(vb, vs);
+            vt = _mm256_srli_epi64(va, 33);
+            vb = _mm256_xor_si256(va, vt);
+            va = avx2_mullo_epi64(vb, vc1);
+            vt = _mm256_srli_epi64(va, 33);
+            vb = _mm256_xor_si256(va, vt);
+            va = avx2_mullo_epi64(vb, vc2);
+            vt = _mm256_srli_epi64(va, 33);
+            vb = _mm256_xor_si256(va, vt);
+#endif
+
+            __m256i vkeys = _mm256_srli_epi64(vb, 11);
+            __m256i cmp = _mm256_cmpgt_epi64(
+                _mm256_xor_si256(vthresh, vsign),
+                _mm256_xor_si256(vkeys,   vsign));
+            int pass_bits = _mm256_movemask_pd(_mm256_castsi256_pd(cmp));
+
+            if (pass_bits) {
+                uint64_t keyv[4];
+                _mm256_storeu_si256((__m256i*)keyv, vkeys);
+                for (int j = 0; j < 4; ++j) {
+                    if ((pass_bits & (1 << j)) && lane_valid[base + j])
+                        insertKey(keyv[j]);
+                }
+                vthresh = _mm256_set1_epi64x((long long)threshold_);
+            }
         }
 #else
         if (!(lane_valid[0]|lane_valid[1]|lane_valid[2]|lane_valid[3]|
