@@ -1,5 +1,5 @@
 /**
- * ProbKMV – K Minimum Values sketch with ntHash rolling + fmix finalizer.
+ * FastKMV – K Minimum Values sketch with ntHash rolling + fmix finalizer.
  *
  * Lazy-sort warmup: the first 2k keys are appended unsorted in O(1).
  * When the buffer fills, compactify() sorts, deduplicates, and truncates
@@ -12,7 +12,7 @@
  * threshold_ == v[k-1] is exact.
  *
  * Rolling hash: ntHash (Mohamadi et al. 2016), canonical = min(fwd, rc).
- * Finalizer: murmur3 fmix (default 1 round; compile with -DPROBKMV_DOUBLE_FMUX
+ * Finalizer: murmur3 fmix (default 1 round; compile with -DFASTKMV_DOUBLE_FMUX
  * for 2 rounds), 8-wide AVX-512 when available.
  *
  * Jaccard estimator (standard KMV):
@@ -20,14 +20,14 @@
  *   how many appear in both:  J ≈ common / distinct.
  */
 
-#include "probmh.h"
+#include "fastkmv.h"
 #include "hash_int.h"
 
-// Default: single fmix (faster). Define PROBKMV_DOUBLE_FMUX for two rounds (legacy).
-#ifdef PROBKMV_DOUBLE_FMUX
-#define PROBKMV_FMUX_ROUNDS 2
+// Default: single fmix (faster). Define FASTKMV_DOUBLE_FMUX for two rounds (legacy).
+#ifdef FASTKMV_DOUBLE_FMUX
+#define FASTKMV_FMUX_ROUNDS 2
 #else
-#define PROBKMV_FMUX_ROUNDS 1
+#define FASTKMV_FMUX_ROUNDS 1
 #endif
 
 #include <immintrin.h>
@@ -44,13 +44,13 @@ using namespace Sketch;
 // DNA encoding via bit operations (no 256-byte LUT)
 // ═══════════════════════════════════════════════════════════════════════════
 
-static inline uint8_t pmh_enc_or_invalid(uint8_t c) {
+static inline uint8_t fkmv_enc_or_invalid(uint8_t c) {
     const uint8_t cu = c & 0xDF;
     if (cu == 'A' || cu == 'C' || cu == 'G' || cu == 'T')
         return (c >> 1) & 3;
     return 0xFF;
 }
-#define PMH_VALID(e) ((e) <= 3)
+#define FKMV_VALID(e) ((e) <= 3)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ntHash seed tables  (Mohamadi et al., Bioinformatics 2016)
@@ -83,10 +83,10 @@ static inline __m256i avx2_mullo_epi64(__m256i a, __m256i b) {
 #endif
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ProbKMV  –  constructor / copy / assign
+// FastKMV  –  constructor / copy / assign
 // ═══════════════════════════════════════════════════════════════════════════
 
-ProbKMV::ProbKMV(uint32_t k, int kmer_size, uint64_t seed)
+FastKMV::FastKMV(uint32_t k, int kmer_size, uint64_t seed)
     : k_(k), kmer_size_(kmer_size), seed_(seed),
       buf_cap_(k * 2),
       vals_(new uint64_t[k * 2]),
@@ -100,7 +100,7 @@ ProbKMV::ProbKMV(uint32_t k, int kmer_size, uint64_t seed)
     // Sentinels UINT64_MAX are applied in compactify / merge, not here.
 }
 
-ProbKMV::ProbKMV(const ProbKMV& o)
+FastKMV::FastKMV(const FastKMV& o)
     : k_(o.k_), kmer_size_(o.kmer_size_), seed_(o.seed_),
       buf_cap_(o.buf_cap_),
       vals_(new uint64_t[o.buf_cap_]),
@@ -113,7 +113,7 @@ ProbKMV::ProbKMV(const ProbKMV& o)
         std::fill(vals_.get() + size_, vals_.get() + k_, UINT64_MAX);
 }
 
-ProbKMV& ProbKMV::operator=(ProbKMV other) {
+FastKMV& FastKMV::operator=(FastKMV other) {
     std::swap(k_,         other.k_);
     std::swap(kmer_size_, other.kmer_size_);
     std::swap(seed_,      other.seed_);
@@ -133,7 +133,7 @@ ProbKMV& ProbKMV::operator=(ProbKMV other) {
 //   Phase C — full KMV (sorted_ && size_==k): threshold + lower_bound + memmove.
 // ═══════════════════════════════════════════════════════════════════════════
 
-void ProbKMV::insertKey(uint64_t key) {
+void FastKMV::insertKey(uint64_t key) {
     if (key >= threshold_) return;
 
     if (!sorted_) {
@@ -169,7 +169,7 @@ void ProbKMV::insertKey(uint64_t key) {
 // compactify  –  sort, deduplicate, truncate to k
 // ═══════════════════════════════════════════════════════════════════════════
 
-void ProbKMV::compactify() const {
+void FastKMV::compactify() const {
     uint64_t* v = vals_.get();
     std::sort(v, v + size_);
 
@@ -186,7 +186,7 @@ void ProbKMV::compactify() const {
     sorted_ = true;
 }
 
-void ProbKMV::ensureSorted() const {
+void FastKMV::ensureSorted() const {
     if (!sorted_)
         compactify();
 }
@@ -195,7 +195,7 @@ void ProbKMV::ensureSorted() const {
 // addHash  –  hash → 53-bit integer key → insert into bottom-k
 // ═══════════════════════════════════════════════════════════════════════════
 
-void ProbKMV::addHash(uint64_t h) {
+void FastKMV::addHash(uint64_t h) {
     uint64_t h1 = mc::murmur3_fmix(h, seed_);
     insertKey(h1 >> 11);
 }
@@ -204,7 +204,7 @@ void ProbKMV::addHash(uint64_t h) {
 // update  –  ntHash rolling + SIMD fmix finalizer + threshold filter
 // ═══════════════════════════════════════════════════════════════════════════
 
-void ProbKMV::update(const char* seq, uint64_t length) {
+void FastKMV::update(const char* seq, uint64_t length) {
     const int K = kmer_size_;
     if (length < static_cast<uint64_t>(K)) return;
 
@@ -241,7 +241,7 @@ void ProbKMV::update(const char* seq, uint64_t length) {
     }
 #endif
     for (; p < length; ++p)
-        enc[p] = pmh_enc_or_invalid((uint8_t)seq[p]);
+        enc[p] = fkmv_enc_or_invalid((uint8_t)seq[p]);
 
     // ── Phase 1: ntHash rolling hash ────────────────────────────────────
     uint64_t sf_k[4], sc_ror1[4], sc_km1[4];
@@ -316,7 +316,7 @@ void ProbKMV::update(const char* seq, uint64_t length) {
         vt = _mm512_srli_epi64(va, 33);
         vb = _mm512_xor_epi64(va, vt);
 
-#if PROBKMV_FMUX_ROUNDS >= 2
+#if FASTKMV_FMUX_ROUNDS >= 2
         va = _mm512_xor_epi64(vb, vs);
         vt = _mm512_srli_epi64(va, 33);
         vb = _mm512_xor_epi64(va, vt);
@@ -394,7 +394,7 @@ void ProbKMV::update(const char* seq, uint64_t length) {
         for (int j = 0; j < lanes; ++j) {
             if (!lane_valid[j]) continue;
             uint64_t h0 = mc::murmur3_fmix(resv[j], loc_seed);
-#if PROBKMV_FMUX_ROUNDS >= 2
+#if FASTKMV_FMUX_ROUNDS >= 2
             uint64_t h1 = mc::murmur3_fmix(h0, loc_seed);
 #else
             uint64_t h1 = h0;
@@ -411,7 +411,7 @@ void ProbKMV::update(const char* seq, uint64_t length) {
         if (inv == 0) {
             uint64_t canon = (fwd_h < rc_h) ? fwd_h : rc_h;
             uint64_t h0 = mc::murmur3_fmix(canon, loc_seed);
-#if PROBKMV_FMUX_ROUNDS >= 2
+#if FASTKMV_FMUX_ROUNDS >= 2
             uint64_t h1 = mc::murmur3_fmix(h0, loc_seed);
 #else
             uint64_t h1 = h0;
@@ -437,7 +437,7 @@ void ProbKMV::update(const char* seq, uint64_t length) {
 // jaccard  –  standard KMV bottom-k intersection estimator
 // ═══════════════════════════════════════════════════════════════════════════
 
-double ProbKMV::jaccard(const ProbKMV& other) const {
+double FastKMV::jaccard(const FastKMV& other) const {
     assert(k_ == other.k_);
     ensureSorted();
     other.ensureSorted();
@@ -482,12 +482,12 @@ double ProbKMV::jaccard(const ProbKMV& other) const {
 // merge  –  sorted merge of two bottom-k lists, take k smallest distinct
 // ═══════════════════════════════════════════════════════════════════════════
 
-ProbKMV ProbKMV::merge(const ProbKMV& other) const {
+FastKMV FastKMV::merge(const FastKMV& other) const {
     assert(k_ == other.k_ && kmer_size_ == other.kmer_size_);
     ensureSorted();
     other.ensureSorted();
 
-    ProbKMV ret(k_, kmer_size_, seed_);
+    FastKMV ret(k_, kmer_size_, seed_);
 
     const uint64_t* a = vals_.get();
     const uint64_t* b = other.vals_.get();
@@ -523,10 +523,10 @@ ProbKMV ProbKMV::merge(const ProbKMV& other) const {
 // printSketch
 // ═══════════════════════════════════════════════════════════════════════════
 
-void ProbKMV::printSketch() const {
+void FastKMV::printSketch() const {
     ensureSorted();
     std::fprintf(stdout,
-                 "ProbKMV k=%u kmer=%d fill=%u/%u vals[0..19]: ",
+                 "FastKMV k=%u kmer=%d fill=%u/%u vals[0..19]: ",
                  k_, kmer_size_, size_, k_);
     for (uint32_t i = 0; i < k_ && i < 20; ++i)
         std::fprintf(stdout, "%016lx ", (unsigned long)vals_[i]);
@@ -534,4 +534,4 @@ void ProbKMV::printSketch() const {
     std::fprintf(stdout, "\n");
 }
 
-#undef PMH_VALID
+#undef FKMV_VALID

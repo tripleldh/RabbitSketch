@@ -1,14 +1,14 @@
 /**
- * test_ProbKMV – benchmark harness for ProbKMV (Route B).
+ * test_FastKMV – benchmark harness for FastKMV (fast bottom-k KMV sketch).
  *
  * Mirrors test_ProbMinHash.cpp but uses the KMV Jaccard estimator (sorted
  * two-pointer merge) instead of register-wise equality counting.
  *
  * Usage:
- *   exe_test_ProbKMV <file_list> <dist_threshold> <threads> [max_bucket=500]
+ *   exe_test_FastKMV <file_list> <dist_threshold> <threads> [max_bucket=500]
  */
 
-#include "probmh.h"
+#include "fastkmv.h"
 #include "common.h"
 #include "kseq.h"
 
@@ -80,14 +80,14 @@ int main(int argc, char* argv[])
     vector<string> fileArr;
     { string line; while (getline(fs, line)) if (!line.empty()) fileArr.push_back(line); }
     const int n = (int)fileArr.size();
-    cerr << "===== total files: " << n << "  (ProbKMV – Route B)" << endl;
+    cerr << "===== total files: " << n << "  (FastKMV)" << endl;
 
     static const uint32_t K     = 1024;
     static const int      KSIZE = 21;
     static const uint64_t SEED  = 42;
     const int m = (int)K;
 
-    vector<Sketch::ProbKMV> vsketches;
+    vector<Sketch::FastKMV> vsketches;
     vector<string>          paths;
     vsketches.reserve(n);
     paths.reserve(n);
@@ -100,7 +100,7 @@ int main(int argc, char* argv[])
         if (fp1 == NULL) continue;
         kseq_t* ks1 = kseq_init(fp1);
 
-        Sketch::ProbKMV sk(K, KSIZE, SEED);
+        Sketch::FastKMV sk(K, KSIZE, SEED);
         while (kseq_read(ks1) >= 0)
             sk.update(ks1->seq.s, ks1->seq.l);
 
@@ -137,7 +137,7 @@ int main(int argc, char* argv[])
         const uint64_t* src = vsketches[i].getRegisters();
         memcpy(&flat_regs[(size_t)i * m], src, m * sizeof(uint64_t));
     }
-    { vector<Sketch::ProbKMV>().swap(vsketches); }
+    { vector<Sketch::FastKMV>().swap(vsketches); }
 
     double t_flat = get_sec();
     cerr << "flatten + free sketches: " << t_flat - t2 << " s" << endl;
@@ -275,7 +275,7 @@ int main(int argc, char* argv[])
     }
 
     system("mkdir -p res_dir");
-    FILE* fp_out = fopen("res_dir/res.dist.ProbKMV", "w");
+    FILE* fp_out = fopen("res_dir/res.dist.FastKMV", "w");
     for (int t = 0; t < numThreads; t++)
         fwrite(thread_bufs[t].data(), 1, thread_bufs[t].size(), fp_out);
     fclose(fp_out);

@@ -15,7 +15,7 @@ CXXFLAGS := $(filter-out -fno-lto,$(CXXFLAGS))
 CXXFLAGS += -flto
 endif
 
-all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_ProbKMV exe_test_TopLProbMinHash  exe_eval_sketch_acc
+all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_FastKMV exe_test_TopLProbMinHash  exe_eval_sketch_acc
 
 exe_test_HLL: test_HLL.cpp
 	$(CXX) $(CXXFLAGS) test_HLL.cpp -o exe_test_HLL $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
@@ -44,14 +44,14 @@ exe_test_ProbMinHash: test_ProbMinHash.cpp ../src/probmh.cpp
 exe_test_OneProbMinHash: test_OneProbMinHash.cpp ../src/probmh_op.cpp
 	$(CXX) $(CXXFLAGS) -I ../src test_OneProbMinHash.cpp ../src/probmh_op.cpp -o exe_test_OneProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
-exe_test_ProbKMV: test_ProbKMV.cpp ../src/probkmv.cpp
-	$(CXX) $(CXXFLAGS) -I ../src test_ProbKMV.cpp ../src/probkmv.cpp -o exe_test_ProbKMV $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+exe_test_FastKMV: test_FastKMV.cpp ../src/fastkmv.cpp
+	$(CXX) $(CXXFLAGS) -I ../src test_FastKMV.cpp ../src/fastkmv.cpp -o exe_test_FastKMV $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 exe_test_TopLProbMinHash: test_TopLProbMinHash.cpp ../src/probmh.cpp
 	$(CXX) $(CXXFLAGS) -I ../src test_TopLProbMinHash.cpp ../src/probmh.cpp -o exe_test_TopLProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
-exe_eval_sketch_acc: eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/probkmv.cpp
-	$(CXX) $(CXXFLAGS) -I ../src eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/probkmv.cpp -o exe_eval_sketch_acc $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+exe_eval_sketch_acc: eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp
+	$(CXX) $(CXXFLAGS) -I ../src eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp -o exe_eval_sketch_acc $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 clean:
 	rm -f *.o exe_*

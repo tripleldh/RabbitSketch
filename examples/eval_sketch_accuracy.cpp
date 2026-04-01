@@ -33,6 +33,7 @@
 
 #include "Sketch.h"
 #include "probmh.h"
+#include "fastkmv.h"
 #include "common.h"
 
 #include <omp.h>
@@ -196,8 +197,8 @@ int main(int argc, char* argv[])
         op2.update(seq_b.data(), seq_length);
         double oph_j = op1.jaccard(op2);
 
-        // ── ProbKMV – bottom-k (k=1024, kmer=21) ───────────────────
-        Sketch::ProbKMV kv1(1024, 21, 42), kv2(1024, 21, 42);
+        // ── FastKMV – bottom-k (k=1024, kmer=21) ───────────────────
+        Sketch::FastKMV kv1(1024, 21, 42), kv2(1024, 21, 42);
         kv1.update(seq_a.data(), seq_length);
         kv2.update(seq_b.data(), seq_length);
         double kmv_j = kv1.jaccard(kv2);
@@ -501,7 +502,7 @@ int main(int argc, char* argv[])
         op1.update(seq_a.data(), La); op2.update(seq_b.data(), Lb);
         double oph_j = op1.jaccard(op2);
 
-        Sketch::ProbKMV kv1(1024, 21, 42), kv2(1024, 21, 42);
+        Sketch::FastKMV kv1(1024, 21, 42), kv2(1024, 21, 42);
         kv1.update(seq_a.data(), La); kv2.update(seq_b.data(), Lb);
         double kmv_j = kv1.jaccard(kv2);
 
