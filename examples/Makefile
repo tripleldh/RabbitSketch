@@ -2,7 +2,18 @@ INCLUDE=../build/include
 # CMake places librabbitsketch_static.a in ../build; shared lib is under ../build/lib
 RABBIT_LIBDIRS=-L../build/lib -L../build
 CXX=g++
-CXXFLAGS=-g1 -O3 -std=c++14 -fopenmp -march=native -DNDEBUG -flto -funroll-loops -I $(INCLUDE)
+#
+# The static library must be rebuilt without LTO after CMake change (see ../CMakeLists.txt).
+# If ../build/lib/librabbitsketch_static.a was built with -flto, conda/other g++ will fail
+# at link with "bytecode stream ... lto-wrapper". Fix: re-run cmake --build in ../build.
+#
+# Optional: make USE_LTO=1 only if you rebuilt librabbitsketch_static.a with the same $(CXX)+-flto.
+USE_LTO ?= 0
+CXXFLAGS=-g1 -O3 -std=c++20 -fopenmp -march=native -DNDEBUG -funroll-loops -fno-lto -I $(INCLUDE)
+ifeq ($(USE_LTO),1)
+CXXFLAGS := $(filter-out -fno-lto,$(CXXFLAGS))
+CXXFLAGS += -flto
+endif
 
 all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_ProbKMV exe_test_TopLProbMinHash  exe_eval_sketch_acc
 

@@ -6,12 +6,14 @@
  * to the bottom-k in one pass, producing a sorted array with exact
  * threshold — identical to the original design from that point on.
  *
- * Steady state: sorted array with O(log k) binary_search dedup +
- * O(k) memmove insertion — the same hardware-optimised path as the
- * original implementation.  Threshold is always exact.
+ * Warmup (sorted_==false): O(1) append into 2k buffer; at 2k entries,
+ * compactify() sorts, dedupes, truncates to bottom-k (may repeat if still <k).
+ * Steady state: sorted bottom-k, O(log k) lower_bound + O(k) memmove;
+ * threshold_ == v[k-1] is exact.
  *
  * Rolling hash: ntHash (Mohamadi et al. 2016), canonical = min(fwd, rc).
- * Finalizer: 1-2 rounds murmur3 fmix, 8-wide AVX-512.
+ * Finalizer: murmur3 fmix (default 1 round; compile with -DPROBKMV_DOUBLE_FMUX
+ * for 2 rounds), 8-wide AVX-512 when available.
  *
  * Jaccard estimator (standard KMV):
  *   merge two sorted sketches, take k smallest distinct values, count
@@ -20,6 +22,13 @@
 
 #include "probmh.h"
 #include "hash_int.h"
+
+// Default: single fmix (faster). Define PROBKMV_DOUBLE_FMUX for two rounds (legacy).
+#ifdef PROBKMV_DOUBLE_FMUX
+#define PROBKMV_FMUX_ROUNDS 2
+#else
+#define PROBKMV_FMUX_ROUNDS 1
+#endif
 
 #include <immintrin.h>
 #include <cstring>
@@ -83,11 +92,12 @@ ProbKMV::ProbKMV(uint32_t k, int kmer_size, uint64_t seed)
       vals_(new uint64_t[k * 2]),
       size_(0),
       threshold_(UINT64_MAX),
-      sorted_(true)
+      sorted_(false)
 {
     assert(k > 1);
     assert(kmer_size >= 1 && kmer_size <= 32);
-    std::fill_n(vals_.get(), k, UINT64_MAX);
+    // Warmup: append-only until buf full → compactify (see insertKey).
+    // Sentinels UINT64_MAX are applied in compactify / merge, not here.
 }
 
 ProbKMV::ProbKMV(const ProbKMV& o)
@@ -118,8 +128,9 @@ ProbKMV& ProbKMV::operator=(ProbKMV other) {
 // ═══════════════════════════════════════════════════════════════════════════
 // insertKey
 //
-//   Unsorted warmup: O(1) append.  Buffer full → compactify → sorted.
-//   Sorted steady state: O(log k) binary search + O(k) memmove.
+//   Phase A — warmup (!sorted_): O(1) append; threshold_ is UINT64_MAX.
+//   Phase B — sorted but unfilled (sorted_ && size_<k): lower_bound + memmove.
+//   Phase C — full KMV (sorted_ && size_==k): threshold + lower_bound + memmove.
 // ═══════════════════════════════════════════════════════════════════════════
 
 void ProbKMV::insertKey(uint64_t key) {
@@ -305,7 +316,7 @@ void ProbKMV::update(const char* seq, uint64_t length) {
         vt = _mm512_srli_epi64(va, 33);
         vb = _mm512_xor_epi64(va, vt);
 
-#ifndef PMH_FAST_HASH
+#if PROBKMV_FMUX_ROUNDS >= 2
         va = _mm512_xor_epi64(vb, vs);
         vt = _mm512_srli_epi64(va, 33);
         vb = _mm512_xor_epi64(va, vt);
@@ -383,10 +394,10 @@ void ProbKMV::update(const char* seq, uint64_t length) {
         for (int j = 0; j < lanes; ++j) {
             if (!lane_valid[j]) continue;
             uint64_t h0 = mc::murmur3_fmix(resv[j], loc_seed);
-#ifdef PMH_FAST_HASH
-            uint64_t h1 = h0;
-#else
+#if PROBKMV_FMUX_ROUNDS >= 2
             uint64_t h1 = mc::murmur3_fmix(h0, loc_seed);
+#else
+            uint64_t h1 = h0;
 #endif
             uint64_t key = h1 >> 11;
             if (key >= threshold_) continue;
@@ -400,10 +411,10 @@ void ProbKMV::update(const char* seq, uint64_t length) {
         if (inv == 0) {
             uint64_t canon = (fwd_h < rc_h) ? fwd_h : rc_h;
             uint64_t h0 = mc::murmur3_fmix(canon, loc_seed);
-#ifdef PMH_FAST_HASH
-            uint64_t h1 = h0;
-#else
+#if PROBKMV_FMUX_ROUNDS >= 2
             uint64_t h1 = mc::murmur3_fmix(h0, loc_seed);
+#else
+            uint64_t h1 = h0;
 #endif
             uint64_t key = h1 >> 11;
             if (key < threshold_)

@@ -242,10 +242,9 @@ private:
 //
 //     sketch(A) = bottom-k { g(x) : x ∈ A }
 //
-// This is a KMV (K Minimum Values) structure: canonical k-mers are hashed with
-// MurmurHash3_x64_128 (8-byte key, lower 64 bits → [0,1); same family as MinHash).
-// Optional -DPMH_FAST_HASH uses one round instead of two.  Jaccard uses the
-// standard KMV two-pointer merge:
+// This is a KMV (K Minimum Values) structure: canonical k-mers use ntHash + murmur3
+// fmix (default one fmix round; compile with -DPROBKMV_DOUBLE_FMUX for two rounds).
+// Jaccard uses the standard KMV two-pointer merge:
 //
 //     J ≈ |S_A ∩ S_B in bottom-k of S_A ∪ S_B| / k
 //
@@ -264,7 +263,7 @@ private:
 //   • Warmup: O(1) append into 2k buffer; first compactify sorts,
 //     deduplicates, and truncates to sorted bottom-k.
 //   • Steady state: sorted array with O(log k) binary_search + O(k)
-//     memmove — identical to original, hardware-optimised path.
+//     memmove; threshold_ == v[k-1] is exact.
 //   • Threshold pre-filter rejects >99% of elements after warm-up
 //   • This is a KMV sketch, not ProbMinHash proper
 //
