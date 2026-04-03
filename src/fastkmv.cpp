@@ -15,6 +15,9 @@
  * Finalizer: murmur3 fmix (default 1 round; compile with -DFASTKMV_DOUBLE_FMUX
  * for 2 rounds), 8-wide AVX-512 when available.
  *
+ * Ablation: -DFASTKMV_NO_FMUX skips the finalizer and uses (canonical_ntHash >> 11)
+ * as the sketch key (testing only; expect different Jaccard accuracy).
+ *
  * Jaccard estimator (standard KMV):
  *   merge two sorted sketches, take k smallest distinct values, count
  *   how many appear in both:  J ≈ common / distinct.
@@ -24,6 +27,7 @@
 #include "hash_int.h"
 
 // Default: single fmix (faster). Define FASTKMV_DOUBLE_FMUX for two rounds (legacy).
+// Define FASTKMV_NO_FMUX to disable fmix entirely (raw ntHash keys; ablation test).
 #ifdef FASTKMV_DOUBLE_FMUX
 #define FASTKMV_FMUX_ROUNDS 2
 #else
@@ -196,8 +200,12 @@ void FastKMV::ensureSorted() const {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void FastKMV::addHash(uint64_t h) {
+#ifdef FASTKMV_NO_FMUX
+    insertKey(h >> 11);
+#else
     uint64_t h1 = mc::murmur3_fmix(h, seed_);
     insertKey(h1 >> 11);
+#endif
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -265,15 +273,19 @@ void FastKMV::update(const char* seq, uint64_t length) {
     const uint64_t N_body  = length - static_cast<uint64_t>(K);
     const uint64_t N_batch = (N_body >= 1) ? (N_body / lanes) * lanes : 0;
 
-#if defined(__AVX512F__) && defined(__AVX512DQ__)
+#if defined(__AVX512F__) && defined(__AVX512DQ__) && !defined(FASTKMV_NO_FMUX)
     const __m512i vs  = _mm512_set1_epi64((int64_t)loc_seed);
     const __m512i vc1 = _mm512_set1_epi64(0xff51afd7ed558ccdLL);
     const __m512i vc2 = _mm512_set1_epi64(0xc4ceb9fe1a85ec53LL);
+#endif
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
     __m512i vthresh = _mm512_set1_epi64((int64_t)threshold_);
 #elif defined(__AVX2__)
+#ifndef FASTKMV_NO_FMUX
     const __m256i vs  = _mm256_set1_epi64x((long long)loc_seed);
     const __m256i vc1 = _mm256_set1_epi64x(0xff51afd7ed558ccdLL);
     const __m256i vc2 = _mm256_set1_epi64x(0xc4ceb9fe1a85ec53LL);
+#endif
     const __m256i vsign = _mm256_set1_epi64x((long long)0x8000000000000000ULL);
     __m256i vthresh = _mm256_set1_epi64x((long long)threshold_);
 #endif
@@ -305,6 +317,9 @@ void FastKMV::update(const char* seq, uint64_t length) {
             if (lane_valid[j]) valid_mask |= (1u << j);
         if (!valid_mask) continue;
 
+#ifdef FASTKMV_NO_FMUX
+        __m512i vkeys = _mm512_srli_epi64(_mm512_loadu_si512((const void*)resv), 11);
+#else
         __m512i vb = _mm512_loadu_si512((const void*)resv);
         __m512i va = _mm512_xor_epi64(vb, vs);
         __m512i vt = _mm512_srli_epi64(va, 33);
@@ -329,6 +344,7 @@ void FastKMV::update(const char* seq, uint64_t length) {
 #endif
 
         __m512i vkeys = _mm512_srli_epi64(vb, 11);
+#endif
         __mmask8 pass_mask = _mm512_mask_cmp_epu64_mask(
             valid_mask, vkeys, vthresh, _MM_CMPINT_LT);
 
@@ -348,6 +364,10 @@ void FastKMV::update(const char* seq, uint64_t length) {
             if (!(lane_valid[base]|lane_valid[base+1]|lane_valid[base+2]|lane_valid[base+3]))
                 continue;
 
+#ifdef FASTKMV_NO_FMUX
+            __m256i vkeys = _mm256_srli_epi64(
+                _mm256_loadu_si256((const __m256i*)(resv + base)), 11);
+#else
             __m256i vb = _mm256_loadu_si256((const __m256i*)(resv + base));
             __m256i va = _mm256_xor_si256(vb, vs);
             __m256i vt = _mm256_srli_epi64(va, 33);
@@ -372,6 +392,7 @@ void FastKMV::update(const char* seq, uint64_t length) {
 #endif
 
             __m256i vkeys = _mm256_srli_epi64(vb, 11);
+#endif
             __m256i cmp = _mm256_cmpgt_epi64(
                 _mm256_xor_si256(vthresh, vsign),
                 _mm256_xor_si256(vkeys,   vsign));
@@ -393,6 +414,9 @@ void FastKMV::update(const char* seq, uint64_t length) {
 
         for (int j = 0; j < lanes; ++j) {
             if (!lane_valid[j]) continue;
+#ifdef FASTKMV_NO_FMUX
+            uint64_t key = resv[j] >> 11;
+#else
             uint64_t h0 = mc::murmur3_fmix(resv[j], loc_seed);
 #if FASTKMV_FMUX_ROUNDS >= 2
             uint64_t h1 = mc::murmur3_fmix(h0, loc_seed);
@@ -400,6 +424,7 @@ void FastKMV::update(const char* seq, uint64_t length) {
             uint64_t h1 = h0;
 #endif
             uint64_t key = h1 >> 11;
+#endif
             if (key >= threshold_) continue;
             insertKey(key);
         }
@@ -410,6 +435,9 @@ void FastKMV::update(const char* seq, uint64_t length) {
     for (uint64_t i = N_batch; i <= N_body; ++i) {
         if (inv == 0) {
             uint64_t canon = (fwd_h < rc_h) ? fwd_h : rc_h;
+#ifdef FASTKMV_NO_FMUX
+            uint64_t key = canon >> 11;
+#else
             uint64_t h0 = mc::murmur3_fmix(canon, loc_seed);
 #if FASTKMV_FMUX_ROUNDS >= 2
             uint64_t h1 = mc::murmur3_fmix(h0, loc_seed);
@@ -417,6 +445,7 @@ void FastKMV::update(const char* seq, uint64_t length) {
             uint64_t h1 = h0;
 #endif
             uint64_t key = h1 >> 11;
+#endif
             if (key < threshold_)
                 insertKey(key);
         }

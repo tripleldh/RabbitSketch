@@ -23,6 +23,9 @@
  *
  * Interface mirrors HyperLogLog / SetSketch in this library:
  *   update(seq, length) – ingest a DNA/RNA sequence (k-mer rolling hash)
+ *   updateWeighted(...) – same with per–k-mer or uniform positive weights (weighted
+ *                        multiset / probability-mass extension; see Ertl TKDE 2020)
+ *   addHash(h, w)       – insert one hashed element with weight w (default 1)
  *   distance(other)     – probability Jaccard distance  [0, 1]
  *   jaccard(other)      – probability Jaccard similarity [0, 1]
  *   merge(other)        – element-wise min merge (returns new sketch)
@@ -120,6 +123,20 @@ public:
      */
     void update(const char* seq, uint64_t length);
 
+    /** Every k-mer occurrence uses the same weight @p weight_each (> 0). */
+    void updateWeighted(const char* seq, uint64_t length, double weight_each);
+
+    /**
+     * Per starting position: weight for the k-mer seq[pos .. pos+k-1] is
+     * weight_per_kmer_start[pos].  Array must cover indices 0 .. length - k;
+     * entries <= 0 skip that k-mer.  Requires length >= kmer_size.
+     */
+    void updateWeighted(const char* seq, uint64_t length,
+                        const double* weight_per_kmer_start);
+
+    /** Insert one element from raw k-mer hash @p h with weight @p weight (default 1). */
+    void addHash(uint64_t h, double weight = 1.0);
+
     /**
      * Return the probability Jaccard similarity in [0, 1].
      */
@@ -151,8 +168,11 @@ public:
     void printSketch() const;
 
 private:
-    void addHash(uint64_t h);
-    void addHashFromRng(uint64_t rng);
+    void addHashFromRng(uint64_t rng, double weight);
+    void addHashFromRngInv(uint64_t rng, double wInv);
+    void updateWeightedImpl(const char* seq, uint64_t length,
+                            const double* weight_per_kmer_start,
+                            double uniform_weight);
 
     // Packed TED (Truncated-Exponential Distribution) parameters.
     // Replaces five separate arrays (boundaries_, ted_rate_, ted_c1/c2/c3_)

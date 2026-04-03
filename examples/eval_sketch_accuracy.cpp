@@ -1,6 +1,10 @@
 /**
  * eval_sketch_accuracy – synthetic benchmark for sketch Jaccard accuracy.
  *
+ * FastKMV（单轮 fmix / 无 fmix）对 MinHash：定长+变长见 eval_fkmv_accuracy.cpp：
+ *   make -C examples eval_fkmv_all
+ *   ./eval_fkmv_{single,nofmix} <pairs_per_rate> <fixed_len_bp> <threads>
+ *
  * Generates pairs of random DNA sequences with controlled per-base substitution
  * rates.  For each pair, builds all five sketch types and compares the estimated
  * Jaccard against the theoretical Mash formula:
@@ -16,12 +20,21 @@
  *
  * §1  Fixed-length benchmark:  all pairs use seq_length (default 4 Mbp).
  * §2  Variable-length benchmark: lengths drawn log-uniformly from
- *     [500 Kbp, 20 Mbp], mimicking the broad size range of real genomes.
+ *     [50 Kbp, 8 Mbp].
  *     Within each pair both sequences share the same length; length varies
  *     across pairs.
  *
  * Usage:
- *   exe_eval_sketch_acc [pairs_per_rate] [seq_length] [threads]
+ *   exe_eval_sketch_acc [pairs_per_rate] [seq_length] [threads] [mode]
+ *
+ * mode (optional):
+ *   both   — 定长 + 变长（默认）
+ *   fixed  — 仅定长（seq_length 有效）
+ *   var    — 仅变长（seq_length 仅用于日志；FastKMV 为单轮 fmix 时请用未带 FASTKMV_NO_FMUX 的 fastkmv.cpp 链接）
+ *
+ * 机器可读汇总行（stderr）：
+ *   PARSE_FIXED len=<bp> HLL=... SetSketch=... KSSD=... MinHash=... ProbMH=... OnePerm=... KMV=... TL1=... TL2=... TL4=...
+ *   PARSE_VARLEN HLL=... ... TL1=... TL2=... TL4=...
  *
  * Output:
  *   stdout  – two CSV sections (fixed-length then variable-length)
@@ -48,6 +61,18 @@
 #include <vector>
 
 using namespace std;
+
+enum EvalMode { EVAL_BOTH = 0, EVAL_FIXED_ONLY, EVAL_VAR_ONLY };
+
+static EvalMode parse_mode(int argc, char** argv) {
+    if (argc <= 4)
+        return EVAL_BOTH;
+    if (strcmp(argv[4], "fixed") == 0)
+        return EVAL_FIXED_ONLY;
+    if (strcmp(argv[4], "var") == 0 || strcmp(argv[4], "varlen") == 0)
+        return EVAL_VAR_ONLY;
+    return EVAL_BOTH;
+}
 
 static const char BASES[] = "ACGT";
 
@@ -92,6 +117,7 @@ int main(int argc, char* argv[])
     int pairs_per_rate = (argc > 1) ? atoi(argv[1]) : 500;
     int seq_length     = (argc > 2) ? atoi(argv[2]) : 4000000;
     int numThreads     = (argc > 3) ? atoi(argv[3]) : 8;
+    EvalMode mode      = parse_mode(argc, argv);
     if (pairs_per_rate < 1) pairs_per_rate = 1;
     if (numThreads < 1) numThreads = 1;
 
@@ -111,22 +137,35 @@ int main(int argc, char* argv[])
     int n_rates     = (int)rates.size();
     int total_pairs = n_rates * pairs_per_rate;
 
-    fprintf(stderr,
-            "=== Sketch Accuracy Evaluation ===\n"
-            "  pairs/rate    : %d\n"
-            "  seq length    : %d bp\n"
-            "  mutation rates: %d levels (%.3f – %.3f)\n"
-            "  total pairs   : %d  (%d sequences)\n"
-            "  threads       : %d\n"
-            "  sketch sizes  : HLL=1024  SS=1024  MH=1024  PMH=1024  OPH=1024  KMV=1024  TL{1,2,4}=1024\n"
-            "  k-mer sizes   : HLL=32  SS=32  KSSD=20  MH=21  PMH=21  OPH=21  KMV=21  TL=21\n\n",
-            pairs_per_rate, seq_length, n_rates,
-            rates.front(), rates.back(),
-            total_pairs, total_pairs * 2, numThreads);
-
-    vector<PairResult> results(total_pairs);
+    if (mode == EVAL_VAR_ONLY) {
+        fprintf(stderr,
+                "=== Sketch Accuracy — variable-length only ===\n"
+                "  pairs/rate    : %d\n"
+                "  mutation rates: %d levels (%.3f – %.3f)\n"
+                "  total pairs   : %d\n"
+                "  threads       : %d\n"
+                "  La,Lb ~ log-unif [50k, 8M] bp\n\n",
+                pairs_per_rate, n_rates, rates.front(), rates.back(),
+                total_pairs, numThreads);
+    } else {
+        fprintf(stderr,
+                "=== Sketch Accuracy Evaluation ===\n"
+                "  pairs/rate    : %d\n"
+                "  seq length    : %d bp\n"
+                "  mutation rates: %d levels (%.3f – %.3f)\n"
+                "  total pairs   : %d  (%d sequences)\n"
+                "  threads       : %d\n"
+                "  sketch sizes  : HLL=1024  SS=1024  MH=1024  PMH=1024  OPH=1024  KMV=1024  TL{1,2,4}=1024\n"
+                "  k-mer sizes   : HLL=32  SS=32  KSSD=20  MH=21  PMH=21  OPH=21  KMV=21  TL=21\n\n",
+                pairs_per_rate, seq_length, n_rates,
+                rates.front(), rates.back(),
+                total_pairs, total_pairs * 2, numThreads);
+    }
 
     double t0 = get_sec();
+
+    if (mode != EVAL_VAR_ONLY) {
+    vector<PairResult> results(total_pairs);
 
     #pragma omp parallel for schedule(dynamic) num_threads(numThreads)
     for (int idx = 0; idx < total_pairs; idx++) {
@@ -376,11 +415,24 @@ int main(int argc, char* argv[])
 
     fprintf(stderr, "Fixed-len total time: %.2f s\n", get_sec() - t0);
 
+    fprintf(stderr,
+            "PARSE_FIXED len=%d HLL=%.8f SetSketch=%.8f KSSD=%.8f MinHash=%.8f "
+            "ProbMH=%.8f OnePerm=%.8f KMV=%.8f TL1=%.8f TL2=%.8f TL4=%.8f\n",
+            seq_length,
+            g_hll / total_pairs, g_ss / total_pairs, g_kd / total_pairs,
+            g_mh / total_pairs, g_pmh / total_pairs, g_oph / total_pairs,
+            g_kmv / total_pairs, g_tl1 / total_pairs, g_tl2 / total_pairs,
+            g_tl4 / total_pairs);
+
+    if (mode == EVAL_FIXED_ONLY)
+        return 0;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // §2  VARIABLE-LENGTH BENCHMARK  (mixed-size pairs)
     //
     //     For each pair, seq_a and seq_b have *independently* sampled lengths
-    //     L_a and L_b drawn log-uniformly from [500 Kbp, 20 Mbp].
+    //     L_a and L_b drawn log-uniformly from [50 Kbp, 8 Mbp].
     //     Let S = min(L_a, L_b).  seq_b is constructed as:
     //       • first S bases: substitution mutant of seq_a[0..S-1] at rate p
     //       • remaining |L_b − L_a| bases (if any): fresh random sequence
@@ -410,7 +462,7 @@ int main(int argc, char* argv[])
     // Pre-generate all (L_a, L_b) pairs – single-threaded for reproducibility
     {
         mt19937_64 lrng(0xDEADBEEFCAFEULL);
-        uniform_real_distribution<double> log_ld(log(5e5), log(2e7));
+        uniform_real_distribution<double> log_ld(log(50000.0), log(8000000.0));
         for (int i = 0; i < total_pairs; i++) {
             vr[i].len_a = (int)round(exp(log_ld(lrng)));
             vr[i].len_b = (int)round(exp(log_ld(lrng)));
@@ -574,6 +626,12 @@ int main(int argc, char* argv[])
         "%-10s │ %8.5f %9.5f %8.5f %8.5f %8.5f %8.5f %8.5f\n", "RMSE",
         sqrt(v_hll_se/N), sqrt(v_ss_se/N), sqrt(v_kd_se/N),
         sqrt(v_mh_se/N), sqrt(v_pmh_se/N), sqrt(v_oph_se/N), sqrt(v_kmv_se/N));
+
+    fprintf(stderr,
+            "PARSE_VARLEN HLL=%.8f SetSketch=%.8f KSSD=%.8f MinHash=%.8f "
+            "ProbMH=%.8f OnePerm=%.8f KMV=%.8f TL1=%.8f TL2=%.8f TL4=%.8f\n",
+            v_hll / N, v_ss / N, v_kd / N, v_mh / N, v_pmh / N, v_oph / N, v_kmv / N,
+            v_tl1 / N, v_tl2 / N, v_tl4 / N);
 
     // ── Route C: Variable-length Top-L tradeoff table ───────────────────
     fprintf(stderr,

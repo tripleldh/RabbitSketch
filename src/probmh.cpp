@@ -537,23 +537,30 @@ ProbMinHash4& ProbMinHash4::operator=(ProbMinHash4 other) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// addHash  (Opt #3: early return BEFORE perm_.reset())
+// addHash / addHashFromRng  (Opt #3: early return BEFORE perm_.reset())
+// Weighted ProbMinHash4: scale all register “times” by wInv = 1/weight (Ertl).
 // ═══════════════════════════════════════════════════════════════════════════
 
-void ProbMinHash4::addHash(uint64_t h) {
-    addHashFromRng(mc::murmur3_fmix(h, seed_));
+void ProbMinHash4::addHash(uint64_t h, double weight) {
+    addHashFromRng(mc::murmur3_fmix(h, seed_), weight);
 }
 
-void ProbMinHash4::addHashFromRng(uint64_t rng) {
+void ProbMinHash4::addHashFromRng(uint64_t rng, double weight) {
+    if (!(weight > 0.0))
+        return;
+    const double wInv = 1.0 / weight;
+
     // Fast path (~97%): first sample u*c1[0] < 1.
     const TedParam& tp0 = ted_params_[0];
     const double u0  = (double)(rng >> 11) * PMH_INV2_53;
     const double hv0 = u0 * tp0.c1;
-    double hv;
+    double hv_unscaled;
     if (__builtin_expect(hv0 < 1.0, 1))
-        hv = hv0;
+        hv_unscaled = hv0;
     else
-        hv = ted_sample(tp0.c1, tp0.c2, tp0.c3, rng);
+        hv_unscaled = ted_sample(tp0.c1, tp0.c2, tp0.c3, rng);
+
+    double hv = wInv * hv_unscaled;
 
     if (!tracker_.isUpdatePossible(hv)) return;
 
@@ -565,14 +572,14 @@ void ProbMinHash4::addHashFromRng(uint64_t rng) {
     while (tracker_.isUpdatePossible(hv)) {
         tracker_.update(perm_.next(rng), hv);
         if (++updates >= L) break;                                  // ← Top-L
-        if (!tracker_.isUpdatePossible(ted_params_[i - 1].boundary)) break;
+        if (!tracker_.isUpdatePossible(wInv * ted_params_[i - 1].boundary)) break;
         if (i < m_ - 1) {
             const TedParam& tp = ted_params_[i];
-            hv = ted_params_[i - 1].boundary +
-                 tp.gap * ted_sample(tp.c1, tp.c2, tp.c3, rng);
+            hv = wInv * (ted_params_[i - 1].boundary +
+                         tp.gap * ted_sample(tp.c1, tp.c2, tp.c3, rng));
         } else {
-            hv = ted_params_[m_ - 2].boundary +
-                 firstBoundaryInv_ * zig_exponential(rng);
+            hv = wInv * (ted_params_[m_ - 2].boundary +
+                         firstBoundaryInv_ * zig_exponential(rng));
             if (updates < L && tracker_.isUpdatePossible(hv))       // ← Top-L
                 tracker_.update(perm_.next(rng), hv);
             break;
@@ -582,10 +589,28 @@ void ProbMinHash4::addHashFromRng(uint64_t rng) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// update  (Opts #2,4,5,8,12,13)
+// update / updateWeighted  (Opts #2,4,5,8,12,13)
 // ═══════════════════════════════════════════════════════════════════════════
 
 void ProbMinHash4::update(const char* seq, uint64_t length) {
+    updateWeightedImpl(seq, length, nullptr, 1.0);
+}
+
+void ProbMinHash4::updateWeighted(const char* seq, uint64_t length,
+                                  double weight_each) {
+    if (!(weight_each > 0.0))
+        return;
+    updateWeightedImpl(seq, length, nullptr, weight_each);
+}
+
+void ProbMinHash4::updateWeighted(const char* seq, uint64_t length,
+                                  const double* weight_per_kmer_start) {
+    updateWeightedImpl(seq, length, weight_per_kmer_start, 1.0);
+}
+
+void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
+                                      const double* weight_per_kmer_start,
+                                      double uniform_weight) {
     const int K = kmer_size_;
     if (length < static_cast<uint64_t>(K)) return;
 
@@ -657,32 +682,54 @@ void ProbMinHash4::update(const char* seq, uint64_t length) {
         double cur_max = tracker_.getMax();
         for (int j = 0; j < lanes; ++j) {
             if (!lane_valid[j]) continue;
+            const uint64_t pos = i + static_cast<uint64_t>(j);
+            double w = uniform_weight;
+            if (weight_per_kmer_start != nullptr)
+                w *= weight_per_kmer_start[pos];
+            if (!(w > 0.0))
+                continue;
 #ifdef PMH_FAST_HASH
             uint64_t rng_inner = hashvalv[j];
 #else
             uint64_t rng_inner = mc::murmur3_fmix(hashvalv[j], loc_seed);
 #endif
-            double hv_fast = (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0;
-            if (__builtin_expect(hv_fast < 1.0, 1) && hv_fast >= cur_max) continue;
-            addHashFromRng(rng_inner);
+            const double hv_fast = (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0;
+            if (__builtin_expect(hv_fast < 1.0, 1)) {
+                if (hv_fast >= cur_max * w)
+                    continue;
+            }
+            addHashFromRng(rng_inner, w);
             cur_max = tracker_.getMax();   // refresh after real update attempt
         }
     }
 
     // ── Remainder loop (scalar) ──────────────────────────────────────────
+    double cur_max = tracker_.getMax();
     for (uint64_t i = N_batch; i <= N_body; ++i) {
         if (inv == 0) {
-            const uint64_t canonical = (fwd <= rev) ? fwd : rev;
+            double w = uniform_weight;
+            if (weight_per_kmer_start != nullptr)
+                w *= weight_per_kmer_start[i];
+            if (w > 0.0) {
+                const uint64_t canonical = (fwd <= rev) ? fwd : rev;
 #ifdef PMH_FAST_HASH
-            uint64_t rng_inner = mc::murmur3_fmix(canonical, loc_seed);
+                uint64_t rng_inner = mc::murmur3_fmix(canonical, loc_seed);
 #else
-            uint64_t h         = mc::murmur3_fmix(canonical, loc_seed);
-            uint64_t rng_inner = mc::murmur3_fmix(h, loc_seed);
+                uint64_t h         = mc::murmur3_fmix(canonical, loc_seed);
+                uint64_t rng_inner = mc::murmur3_fmix(h, loc_seed);
 #endif
-            double hv_fast = (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0;
-            if (!(__builtin_expect(hv_fast < 1.0, 1) &&
-                  hv_fast >= tracker_.getMax()))
-                addHashFromRng(rng_inner);
+                const double hv_fast =
+                    (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0;
+                if (__builtin_expect(hv_fast < 1.0, 1)) {
+                    if (hv_fast < cur_max * w) {
+                        addHashFromRng(rng_inner, w);
+                        cur_max = tracker_.getMax();
+                    }
+                } else {
+                    addHashFromRng(rng_inner, w);
+                    cur_max = tracker_.getMax();
+                }
+            }
         }
         if (i < N_body) {
             uint8_t ef_out = PMH_ENC(seq[i]);

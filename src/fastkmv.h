@@ -2,7 +2,8 @@
  * FastKMV – fast K Minimum Values sketch for genomic k-mers.
  *
  * ntHash rolling hash + murmur3 fmix; SIMD encoding and batched fmix where
- * available.  Not part of ProbMinHash; standalone KMV / bottom-k estimator.
+ * available.  Compile with -DFASTKMV_NO_FMUX to use raw ntHash>>11 keys (ablation).
+ * Not part of ProbMinHash; standalone KMV / bottom-k estimator.
  *
  * Jaccard: standard KMV two-pointer merge on sorted bottom-k keys.
  */
