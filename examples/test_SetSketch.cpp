@@ -1,13 +1,15 @@
 /**
  * test_SetSketch – fully optimized benchmark harness.
  *
- * Key optimizations vs. naive version:
+ * Key optimizations:
  *  1. Pre-allocate sketch array → eliminate omp critical section
  *  2. Flat contiguous core array → cache-friendly band hash + distance
- *  3. Parallel sort for band_entries
- *  4. LSH bucket size cap → prevent candidate explosion
+ *  3. Band-streaming LSH: process one band at a time with hash-map grouping
+ *     → eliminates O(n·B) band_entries array + expensive global sort
+ *  4. robin_hood hash set for O(1) candidate dedup
+ *     → eliminates O(C·log C) candidate sort + dedup
  *  5. Inline SIMD distance on flat array with prefetch
- *  6. schedule(dynamic, chunk) for amortised atomic overhead
+ *  6. LSH bucket size cap → prevent candidate explosion
  *
  * Usage: exe_test_SetSketch <file_list> <dist_threshold> <threads> [max_bucket=500]
  */
@@ -25,9 +27,7 @@
 #include <cstring>
 #include <immintrin.h>
 #include "common.h"
-#if defined(__GNUC__) && defined(_OPENMP)
-# include <parallel/algorithm>
-#endif
+#include "robin_hood.h"
 using namespace std;
 
 KSEQ_INIT(gzFile, gzread)
@@ -129,9 +129,23 @@ int main(int argc, char* argv[])
   double t_phase1 = get_sec();
   cerr << "  Phase 1 cardinality + flatten (parallel): " << t_phase1 - t2 << " s" << endl;
 
-  // ── Phase 3: LSH banding on flat array ──────────────────────────────────────
+  // ── Phase 3–5: Band-streaming LSH + inline verification ─────────────────────
+  //
+  // Instead of materializing n×BANDS entries, sorting, deduplicating, and then
+  // verifying, we process ONE BAND AT A TIME:
+  //   1. Build hash-map buckets for band b   → O(n)
+  //   2. Enumerate candidate pairs per bucket → O(pairs_in_band)
+  //   3. Dedup via robin_hood hash set        → O(1) per pair
+  //   4. Verify new pairs inline (parallel)   → O(new_pairs × m)
+  //
+  // Memory savings:
+  //   - Eliminates band_entries  (was n×128×12 bytes)
+  //   - Eliminates candidates    (was up to billions of entries + sort)
+  //   - Dedup set grows only to unique candidate count
+
   const int BANDS = 128;
   const int ROWS  = m / BANDS;
+  const double min_jaccard = 1.0 - thres;
 
   auto band_hash = [](const uint8_t* data, int len) -> uint32_t {
     uint32_t h = 2166136261u;
@@ -139,137 +153,116 @@ int main(int argc, char* argv[])
     return h;
   };
 
-  vector<pair<uint64_t,int>> band_entries((size_t)n * BANDS);
-  #pragma omp parallel for num_threads(numThreads) schedule(static)
-  for (int i = 0; i < n; i++) {
-    const uint8_t* core = &flat_cores[(size_t)i * m];
-    for (int b = 0; b < BANDS; b++) {
-      uint32_t h = band_hash(core + b * ROWS, ROWS);
-      band_entries[(size_t)i * BANDS + b] =
-        { ((uint64_t)(uint32_t)b << 32) | (uint32_t)h, i };
-    }
-  }
-  double t_build = get_sec();
-  cerr << "  Phase 2 build band_entries (parallel): " << t_build - t_phase1 << " s" << endl;
-
-  // Parallel sort
-#if defined(__GNUC__) && defined(_OPENMP)
-  __gnu_parallel::sort(band_entries.begin(), band_entries.end());
-#else
-  sort(band_entries.begin(), band_entries.end());
-#endif
-  double t_sort_bands = get_sec();
-  cerr << "  Phase 2 sort band_entries [PARALLEL]: " << t_sort_bands - t_build << " s" << endl;
-
-  // Group boundaries
-  vector<size_t> group_start;
-  group_start.reserve(band_entries.size() / 4);
-  group_start.push_back(0);
-  for (size_t i = 1; i < band_entries.size(); i++)
-    if (band_entries[i].first != band_entries[i-1].first)
-      group_start.push_back(i);
-  group_start.push_back(band_entries.size());
-  const int n_bands = (int)group_start.size() - 1;
-
-  // Generate candidates with bucket cap
-  long long skipped_buckets = 0;
-  vector<vector<pair<int,int>>> thread_cands((size_t)numThreads);
-
-  #pragma omp parallel num_threads(numThreads)
-  {
-    int tid = omp_get_thread_num();
-    auto& local = thread_cands[tid];
-    local.clear();
-    #pragma omp for schedule(dynamic) reduction(+:skipped_buckets)
-    for (int g = 0; g < n_bands; g++) {
-      size_t s = group_start[g], e = group_start[g+1];
-      int bsz = (int)(e - s);
-      if (bsz > MAX_BUCKET) { skipped_buckets++; continue; }
-      for (size_t a = s; a < e; a++)
-        for (size_t b = a+1; b < e; b++) {
-          int ia = band_entries[a].second, ib = band_entries[b].second;
-          local.emplace_back(min(ia, ib), max(ia, ib));
-        }
-    }
-  }
-  band_entries.clear();
-  band_entries.shrink_to_fit();
-
-  // Merge per-thread candidates
-  vector<size_t> prefix((size_t)numThreads + 1);
-  prefix[0] = 0;
-  for (int t = 0; t < numThreads; t++)
-    prefix[t+1] = prefix[t] + thread_cands[t].size();
-  size_t total_cands = prefix[numThreads];
-  vector<pair<int,int>> candidates(total_cands);
-  #pragma omp parallel for num_threads(numThreads)
-  for (int t = 0; t < numThreads; t++)
-    copy(thread_cands[t].begin(), thread_cands[t].end(),
-         candidates.begin() + prefix[t]);
-  thread_cands.clear();
-  thread_cands.shrink_to_fit();
-  double t_scan = get_sec();
-  cerr << "  Phase 2 scan->candidates (parallel): " << t_scan - t_sort_bands << " s"
-       << "  (skipped " << skipped_buckets << " large buckets)" << endl;
-
-  // Dedup
-#if defined(__GNUC__) && defined(_OPENMP)
-  __gnu_parallel::sort(candidates.begin(), candidates.end());
-#else
-  sort(candidates.begin(), candidates.end());
-#endif
-  candidates.erase(unique(candidates.begin(), candidates.end()), candidates.end());
-  double t_lsh = get_sec();
-  cerr << "  Phase 2 sort+dedup candidates: " << t_lsh - t_scan << " s" << endl;
-
-  const long long total_pairs = (long long)n * (n - 1) / 2;
-  cerr << "LSH candidates: " << candidates.size()
-       << " / " << total_pairs << " total pairs"
-       << "  (reduction: " << 100.0*(1.0-(double)candidates.size()/total_pairs) << "%)" << endl;
-  cerr << "LSH index time (total): " << t_lsh - t2 << " s" << endl;
-
-  // ── Phase 4: thread-local output buffers (zero IO during computation) ─────
   vector<string> thread_bufs(numThreads);
 
-  // ── Phase 5: distance computation (inline SIMD on flat array + prefetch) ───
-  const double min_jaccard = 1.0 - thres;
-  const int ncand = (int)candidates.size();
+  // Partitioned dedup: split pair space into NUM_PARTS buckets, each with its
+  // own hash set + spinlock, to allow high concurrent insert throughput.
+  constexpr int NUM_PARTS = 256;
+  struct alignas(64) DedupPart {
+    robin_hood::unordered_set<uint64_t> set;
+    omp_lock_t lock;
+  };
+  vector<DedupPart> dedup(NUM_PARTS);
+  for (auto& d : dedup) omp_init_lock(&d.lock);
+
+  auto pair_key = [](int i, int j) -> uint64_t {
+    return ((uint64_t)(unsigned)i << 32) | (unsigned)j;
+  };
+  auto try_insert = [&](int i, int j) -> bool {
+    uint64_t k = pair_key(i, j);
+    int part = (int)((k * 0x9E3779B97F4A7C15ULL) >> 56) & (NUM_PARTS - 1);
+    omp_set_lock(&dedup[part].lock);
+    bool inserted = dedup[part].set.insert(k).second;
+    omp_unset_lock(&dedup[part].lock);
+    return inserted;
+  };
+
   atomic<long long> cnt_size_filtered{0};
   atomic<long long> cnt_exact{0};
+  long long total_unique_cands = 0;
+  long long skipped_buckets = 0;
 
-  #pragma omp parallel for num_threads(numThreads) schedule(dynamic, 4096)
-  for (int c = 0; c < ncand; c++) {
-    int i = candidates[c].first, j = candidates[c].second;
+  double t_lsh_start = get_sec();
 
-    // Size-ratio prefilter
-    double si = sizes[i], sj = sizes[j];
-    if (si <= 0 || sj <= 0) { cnt_size_filtered++; continue; }
-    if (min(si, sj) / max(si, sj) < min_jaccard * 0.93) { cnt_size_filtered++; continue; }
-
-    // Prefetch next pair's core data
-    if (c + 1 < ncand) {
-      __builtin_prefetch(&flat_cores[(size_t)candidates[c+1].first  * m], 0, 0);
-      __builtin_prefetch(&flat_cores[(size_t)candidates[c+1].second * m], 0, 0);
+  for (int b = 0; b < BANDS; b++) {
+    // ── 3a. Build bucket map for this band ──────────────────────────────────
+    robin_hood::unordered_map<uint32_t, vector<int>> bkt;
+    bkt.reserve((size_t)n);
+    for (int i = 0; i < n; i++) {
+      uint32_t h = band_hash(flat_cores.data() + (size_t)i * m + b * ROWS, ROWS);
+      bkt[h].push_back(i);
     }
 
-    // Inline distance on flat array
-    cnt_exact++;
-    const uint8_t* c1 = &flat_cores[(size_t)i * m];
-    const uint8_t* c2 = &flat_cores[(size_t)j * m];
-    double us = flat_union_card(c1, c2, m, bip, factor);
-    if (us <= 0.0) continue;
-    double inter = si + sj - us;
-    double jaccard = (inter > 0.0) ? inter / us : 0.0;
-    double dist = 1.0 - jaccard;
-
-    if (dist < thres) {
-      int tid = omp_get_thread_num();
-      char line[4096];
-      int len = snprintf(line, sizeof(line), "%s\t%s\t%lf\n",
-                         fileArr[i].c_str(), fileArr[j].c_str(), dist);
-      thread_bufs[tid].append(line, len);
+    // ── 3b. Collect new candidate pairs (dedup against previous bands) ──────
+    vector<pair<int,int>> new_pairs;
+    for (auto& [key, ids] : bkt) {
+      int sz = (int)ids.size();
+      if (sz < 2) continue;
+      if (sz > MAX_BUCKET) { skipped_buckets++; continue; }
+      for (int a = 0; a < sz; a++)
+        for (int c = a + 1; c < sz; c++) {
+          int ii = min(ids[a], ids[c]), jj = max(ids[a], ids[c]);
+          // Size-ratio prefilter (cheap, avoids hash set lookup)
+          double si = sizes[ii], sj = sizes[jj];
+          if (si <= 0 || sj <= 0) continue;
+          if (min(si, sj) / max(si, sj) < min_jaccard * 0.93) {
+            cnt_size_filtered++;
+            continue;
+          }
+          new_pairs.emplace_back(ii, jj);
+        }
     }
+
+    // ── 3c. Dedup + inline verification (parallel) ──────────────────────────
+    const int np = (int)new_pairs.size();
+
+    #pragma omp parallel for num_threads(numThreads) schedule(dynamic, 256)
+    for (int c = 0; c < np; c++) {
+      int i = new_pairs[c].first, j = new_pairs[c].second;
+
+      if (!try_insert(i, j)) continue;  // already processed in a previous band
+
+      // Prefetch next pair's core data
+      if (c + 1 < np) {
+        __builtin_prefetch(&flat_cores[(size_t)new_pairs[c+1].first  * m], 0, 0);
+        __builtin_prefetch(&flat_cores[(size_t)new_pairs[c+1].second * m], 0, 0);
+      }
+
+      cnt_exact++;
+      const uint8_t* c1 = &flat_cores[(size_t)i * m];
+      const uint8_t* c2 = &flat_cores[(size_t)j * m];
+      double us = flat_union_card(c1, c2, m, bip, factor);
+      if (us <= 0.0) continue;
+      double si = sizes[i], sj = sizes[j];
+      double inter = si + sj - us;
+      double jaccard = (inter > 0.0) ? inter / us : 0.0;
+      double dist = 1.0 - jaccard;
+
+      if (dist < thres) {
+        int tid = omp_get_thread_num();
+        char line[4096];
+        int len = snprintf(line, sizeof(line), "%s\t%s\t%lf\n",
+                           fileArr[i].c_str(), fileArr[j].c_str(), dist);
+        thread_bufs[tid].append(line, len);
+      }
+    }
+    total_unique_cands += np;
   }
+
+  for (auto& d : dedup) omp_destroy_lock(&d.lock);
+  long long dedup_total = 0;
+  for (auto& d : dedup) dedup_total += (long long)d.set.size();
+
+  double t_lsh = get_sec();
+  const long long total_pairs = (long long)n * (n - 1) / 2;
+  cerr << "LSH band-streaming done (" << BANDS << " bands):" << endl;
+  cerr << "  unique candidates:  " << dedup_total << " / " << total_pairs
+       << " total pairs (reduction: "
+       << 100.0*(1.0-(double)dedup_total/total_pairs) << "%)" << endl;
+  cerr << "  skipped buckets:    " << skipped_buckets << endl;
+  cerr << "  size-filtered:      " << cnt_size_filtered.load() << endl;
+  cerr << "  exact computed:     " << cnt_exact.load() << endl;
+  cerr << "  LSH + verify time:  " << t_lsh - t_phase1 << " s" << endl;
 
   // Flush all buffers to a single output file
   system("mkdir -p res_dir");
@@ -279,10 +272,7 @@ int main(int argc, char* argv[])
   fclose(fp_out);
 
   double t3 = get_sec();
-  cerr << "dist time is: " << t3 - t_lsh << " s" << endl;
-  cerr << "  candidates:    " << (long long)candidates.size() << endl;
-  cerr << "  size-filtered: " << cnt_size_filtered.load() << endl;
-  cerr << "  exact computed:" << cnt_exact.load() << endl;
+  cerr << "total time: " << t3 - t1 << " s" << endl;
 
   return 0;
 }

@@ -1,10 +1,13 @@
 /**
- * test_ProbMinHash – benchmark harness for ProbMinHash4.
+ * test_ProbMinHash – benchmark harness for weighted ProbMinHash4.
+ *
+ * 与 eval_pmh_weighted_accuracy 一致：每条 read 内 k-mer 起点 i（0 .. L-k）
+ * 使用确定性权重 w[i]∈[0.25,1]，再调用 updateWeighted(seq, L, w.data())。
  *
  * Structure mirrors test_MinHash.cpp (no serial pre-allocation):
  *   - File list read (serial, fast).
  *   - Parallel loop: each thread opens one file, constructs one ProbMinHash4,
- *     reads + updates, then critical push_back.  No long serial "Phase 0".
+ *     reads + weighted updates, then critical push_back.
  *   - Flatten registers to flat array, LSH banding, candidate verification.
  *
  * Usage:
@@ -26,6 +29,7 @@
 #include <fstream>
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 
@@ -79,6 +83,11 @@ static inline double flat_jaccard(const double* __restrict__ a,
     return (double)count / (double)m;
 }
 
+// Weights are now computed by fill_kmer_entropy_weights() from common.h:
+// w[i] = Shannon entropy of k-mer at position i, normalized to [0.1, 1.0].
+// Low-complexity k-mers (poly-A runs, repetitive regions) get low weight;
+// high-complexity k-mers get high weight.
+
 int main(int argc, char* argv[])
 {
     if (argc < 4) {
@@ -99,7 +108,7 @@ int main(int argc, char* argv[])
     vector<string> fileArr;
     { string line; while (getline(fs, line)) if (!line.empty()) fileArr.push_back(line); }
     const int n = (int)fileArr.size();
-    cerr << "===== total files: " << n << "  (ProbMinHash4)" << endl;
+    cerr << "===== total files: " << n << "  (ProbMinHash4 weighted, k-mer start weights)" << endl;
 
     static const uint32_t M     = 1024;
     static const int      KSIZE = 21;
@@ -122,8 +131,16 @@ int main(int argc, char* argv[])
         kseq_t* ks1 = kseq_init(fp1);
 
         Sketch::ProbMinHash4 sk(M, KSIZE, SEED);
-        while (kseq_read(ks1) >= 0)
-            sk.update(ks1->seq.s, ks1->seq.l);
+        vector<double>        w;
+        while (kseq_read(ks1) >= 0) {
+            uint64_t L = static_cast<uint64_t>(ks1->seq.l);
+            if (L >= static_cast<uint64_t>(KSIZE)) {
+                // Shannon entropy weights: same k-mer → same weight across sequences.
+                // Low-complexity k-mers (poly-A, repeats) get low weight (≥0.1).
+                fill_kmer_entropy_weights(w, ks1->seq.s, L, KSIZE);
+                sk.updateWeighted(ks1->seq.s, L, w.data());
+            }
+        }
 
         #pragma omp critical
         {

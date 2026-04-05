@@ -551,7 +551,9 @@ void ProbMinHash4::addHashFromRng(uint64_t rng, double weight) {
     const double wInv = 1.0 / weight;
 
     // Fast path (~97%): first sample u*c1[0] < 1.
-    const TedParam& tp0 = ted_params_[0];
+    // Cache ted pointer and m_ as locals to avoid repeated member loads.
+    const TedParam* const ted = ted_params_.get();
+    const TedParam& tp0 = ted[0];
     const double u0  = (double)(rng >> 11) * PMH_INV2_53;
     const double hv0 = u0 * tp0.c1;
     double hv_unscaled;
@@ -562,25 +564,32 @@ void ProbMinHash4::addHashFromRng(uint64_t rng, double weight) {
 
     double hv = wInv * hv_unscaled;
 
-    if (!tracker_.isUpdatePossible(hv)) return;
+    // Cache global max locally.  tracker_.isUpdatePossible() is just
+    // "value < v_[lastIdx_]" – replacing it with a local comparison
+    // eliminates repeated loads of v_[lastIdx_] from the tournament tree.
+    // We refresh cur_max only after tracker_.update() actually changes it.
+    double cur_max = tracker_.getMax();
+    if (!(hv < cur_max)) return;
 
     perm_.reset();
 
     const uint32_t L = max_L_;     // Route C: truncation limit
+    const uint32_t m = m_;
     uint32_t updates = 0;
     uint32_t i = 1;
-    while (tracker_.isUpdatePossible(hv)) {
+    while (hv < cur_max) {
         tracker_.update(perm_.next(rng), hv);
+        cur_max = tracker_.getMax();                                // refresh
         if (++updates >= L) break;                                  // ← Top-L
-        if (!tracker_.isUpdatePossible(wInv * ted_params_[i - 1].boundary)) break;
-        if (i < m_ - 1) {
-            const TedParam& tp = ted_params_[i];
-            hv = wInv * (ted_params_[i - 1].boundary +
+        if (!(wInv * ted[i - 1].boundary < cur_max)) break;
+        if (i < m - 1) {
+            const TedParam& tp = ted[i];
+            hv = wInv * (ted[i - 1].boundary +
                          tp.gap * ted_sample(tp.c1, tp.c2, tp.c3, rng));
         } else {
-            hv = wInv * (ted_params_[m_ - 2].boundary +
+            hv = wInv * (ted[m - 2].boundary +
                          firstBoundaryInv_ * zig_exponential(rng));
-            if (updates < L && tracker_.isUpdatePossible(hv))       // ← Top-L
+            if (updates < L && hv < cur_max)                        // ← Top-L
                 tracker_.update(perm_.next(rng), hv);
             break;
         }
@@ -653,12 +662,17 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
         if (!(lane_valid[0]|lane_valid[1]|lane_valid[2]|lane_valid[3]|
               lane_valid[4]|lane_valid[5]|lane_valid[6]|lane_valid[7])) continue;
 
-        // ── Opt #2: 8-lane batched murmur3_fmix (AVX-512) ───────────────
-        uint64_t hashvalv[8];
+        // ── Opt #2+#2b: fuse both murmur3_fmix rounds + hv_fast into one
+        // SIMD pass (AVX-512).  Non-PMH_FAST_HASH path eliminates 8 scalar
+        // fmix calls per batch.  hv_fast for all 8 lanes computed in float
+        // SIMD.  Two multiplies kept separate to match scalar FP order exactly.
+        uint64_t rng_innerv[8];
+        double   hv_fastv[8];
 #if defined(__AVX512F__) && defined(__AVX512DQ__)
         {
             __m512i vb = _mm512_loadu_si512((const void*)resv);
             __m512i vs = _mm512_set1_epi64((int64_t)loc_seed);
+            // Round 1: fmix(canonical ^ seed)
             __m512i va = _mm512_xor_epi64(vb, vs);
             __m512i vt = _mm512_srli_epi64(va, 33);
             vb = _mm512_xor_epi64(va, vt);
@@ -668,39 +682,108 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
             va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xc4ceb9fe1a85ec53LL));
             vt = _mm512_srli_epi64(va, 33);
             vb = _mm512_xor_epi64(va, vt);
-            _mm512_storeu_si512(hashvalv, vb);
+#ifndef PMH_FAST_HASH
+            // Round 2: fmix(hash ^ seed) – same murmur3_fmix with seed XOR
+            va = _mm512_xor_epi64(vb, vs);
+            vt = _mm512_srli_epi64(va, 33);
+            vb = _mm512_xor_epi64(va, vt);
+            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xff51afd7ed558ccdLL));
+            vt = _mm512_srli_epi64(va, 33);
+            vb = _mm512_xor_epi64(va, vt);
+            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xc4ceb9fe1a85ec53LL));
+            vt = _mm512_srli_epi64(va, 33);
+            vb = _mm512_xor_epi64(va, vt);
+#endif
+            _mm512_storeu_si512(rng_innerv, vb);
+            // hv_fast = ((rng >> 11) * PMH_INV2_53) * loc_c1_0
+            // Two multiplies preserve scalar FP evaluation order exactly.
+            __m512d vd = _mm512_cvtepu64_pd(_mm512_srli_epi64(vb, 11));
+            vd = _mm512_mul_pd(vd, _mm512_set1_pd(PMH_INV2_53));
+            _mm512_storeu_pd(hv_fastv,
+                _mm512_mul_pd(vd, _mm512_set1_pd(loc_c1_0)));
         }
 #else
-        for (int j = 0; j < lanes; ++j)
-            hashvalv[j] = mc::murmur3_fmix(resv[j], loc_seed);
+        for (int j = 0; j < lanes; ++j) {
+            uint64_t h = mc::murmur3_fmix(resv[j], loc_seed);
+#ifndef PMH_FAST_HASH
+            h = mc::murmur3_fmix(h, loc_seed);
+#endif
+            rng_innerv[j] = h;
+            hv_fastv[j]   = (double)(h >> 11) * PMH_INV2_53 * loc_c1_0;
+        }
 #endif
 
-        // ── Opt #5: cur_max loaded once per batch into a register.
-        // Refreshed only when addHashFromRng() is actually invoked, so
-        // later lanes in the same batch benefit from the tighter threshold
-        // without paying a memory load on every pruned lane.
+        // ── Opt #5+#5b: SIMD bitmask prefilter.
+        // For the 99.9%+ of batches where every hv_fast exceeds the
+        // threshold, a single SIMD compare+bitmask replaces 8 scalar
+        // iterations – the while{} body is never entered.
+        // For the rare batches with 1+ candidates we fall through to a
+        // compact scalar loop only over the set bits.
         double cur_max = tracker_.getMax();
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
+        {
+            // Build lane-valid bitmask (branchless byte shifts).
+            const uint8_t lv_mask =
+                (uint8_t)lane_valid[0]         | ((uint8_t)lane_valid[1] << 1) |
+                ((uint8_t)lane_valid[2] << 2)  | ((uint8_t)lane_valid[3] << 3) |
+                ((uint8_t)lane_valid[4] << 4)  | ((uint8_t)lane_valid[5] << 5) |
+                ((uint8_t)lane_valid[6] << 6)  | ((uint8_t)lane_valid[7] << 7);
+
+            __m512d vhf  = _mm512_loadu_pd(hv_fastv);
+            __m512d vone = _mm512_set1_pd(1.0);
+            // Lanes with hv_fast >= 1.0 must enter addHashFromRng regardless.
+            const uint8_t above1 = (uint8_t)_mm512_cmp_pd_mask(vhf, vone, _CMP_GE_OQ);
+
+            uint8_t candidates;
+            if (weight_per_kmer_start != nullptr) {
+                // Per-lane threshold = cur_max * uniform_weight * w[j].
+                __m512d vw     = _mm512_loadu_pd(weight_per_kmer_start + i);
+                __m512d vthresh = _mm512_mul_pd(
+                    _mm512_set1_pd(cur_max * uniform_weight), vw);
+                const uint8_t blt  = (uint8_t)_mm512_cmp_pd_mask(vhf, vthresh, _CMP_LT_OQ);
+                const uint8_t wpos = (uint8_t)_mm512_cmp_pd_mask(
+                    vw, _mm512_setzero_pd(), _CMP_GT_OQ);
+                candidates = lv_mask & (((above1 | blt)) & wpos);
+            } else {
+                // Constant threshold for all lanes.
+                const uint8_t blt = (uint8_t)_mm512_cmp_pd_mask(
+                    vhf, _mm512_set1_pd(cur_max * uniform_weight), _CMP_LT_OQ);
+                candidates = lv_mask & (above1 | blt);
+            }
+
+            // Inner loop runs only for candidates – typically 0 iterations.
+            while (candidates) {
+                const int j = __builtin_ctz(candidates);
+                candidates &= (uint8_t)(candidates - 1);
+                double w = uniform_weight;
+                if (weight_per_kmer_start != nullptr)
+                    w *= weight_per_kmer_start[i + j];
+                // Re-check: cur_max may have tightened from a previous lane.
+                if (__builtin_expect(hv_fastv[j] < 1.0, 1) &&
+                    hv_fastv[j] >= cur_max * w)
+                    continue;
+                addHashFromRng(rng_innerv[j], w);
+                cur_max = tracker_.getMax();
+            }
+        }
+#else
+        // Scalar fallback (non-AVX-512).
         for (int j = 0; j < lanes; ++j) {
             if (!lane_valid[j]) continue;
-            const uint64_t pos = i + static_cast<uint64_t>(j);
             double w = uniform_weight;
             if (weight_per_kmer_start != nullptr)
-                w *= weight_per_kmer_start[pos];
+                w *= weight_per_kmer_start[i + j];
             if (!(w > 0.0))
                 continue;
-#ifdef PMH_FAST_HASH
-            uint64_t rng_inner = hashvalv[j];
-#else
-            uint64_t rng_inner = mc::murmur3_fmix(hashvalv[j], loc_seed);
-#endif
-            const double hv_fast = (double)(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0;
+            const double hv_fast = hv_fastv[j];
             if (__builtin_expect(hv_fast < 1.0, 1)) {
                 if (hv_fast >= cur_max * w)
                     continue;
             }
-            addHashFromRng(rng_inner, w);
-            cur_max = tracker_.getMax();   // refresh after real update attempt
+            addHashFromRng(rng_innerv[j], w);
+            cur_max = tracker_.getMax();
         }
+#endif
     }
 
     // ── Remainder loop (scalar) ──────────────────────────────────────────

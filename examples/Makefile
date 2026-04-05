@@ -15,10 +15,6 @@ CXXFLAGS := $(filter-out -fno-lto,$(CXXFLAGS))
 CXXFLAGS += -flto
 endif
 
-# FastKMV vs MinHash: single-round fmix vs no-fmix (fixed + variable length)
-FKMV_EVAL_SRC = eval_fkmv_accuracy.cpp ../src/fastkmv.cpp
-FKMV_EVAL_LINK = $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
-
 all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_generate_shuf_file exe_main exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_FastKMV exe_test_TopLProbMinHash  exe_eval_sketch_acc
 
 exe_test_HLL: test_HLL.cpp
@@ -57,16 +53,5 @@ exe_test_TopLProbMinHash: test_TopLProbMinHash.cpp ../src/probmh.cpp
 exe_eval_sketch_acc: eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp
 	$(CXX) $(CXXFLAGS) -I ../src eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp -o exe_eval_sketch_acc $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
-exe_eval_pmh_weighted: eval_pmh_weighted_accuracy.cpp ../src/probmh.cpp
-	$(CXX) $(CXXFLAGS) -I ../src eval_pmh_weighted_accuracy.cpp ../src/probmh.cpp -o exe_eval_pmh_weighted $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
-
-eval_fkmv_single: $(FKMV_EVAL_SRC)
-	$(CXX) $(CXXFLAGS) -I ../src eval_fkmv_accuracy.cpp ../src/fastkmv.cpp -o eval_fkmv_single $(FKMV_EVAL_LINK)
-
-eval_fkmv_nofmix: $(FKMV_EVAL_SRC)
-	$(CXX) $(CXXFLAGS) -I ../src -DFASTKMV_NO_FMUX eval_fkmv_accuracy.cpp ../src/fastkmv.cpp -o eval_fkmv_nofmix $(FKMV_EVAL_LINK)
-
-eval_fkmv_all: eval_fkmv_single eval_fkmv_nofmix
-
 clean:
-	rm -f *.o exe_* eval_fkmv_single eval_fkmv_nofmix eval_fkmv_double exe_eval_pmh_weighted
+	rm -f *.o exe_*

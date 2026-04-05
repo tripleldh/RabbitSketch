@@ -3,6 +3,12 @@ cmake_minimum_required(VERSION 2.8)
 project(rabbitsketch)
 
 option(CXXAPI "build pure c++ library instead of python bind interface" OFF)
+# FastKMV key pipeline (only one of these applies to fastkmv.cpp):
+#   default     = single-round murmur3-style fmix after canonical ntHash
+#   DOUBLE_FMUX = two-round fmix (-DFASTKMV_DOUBLE_FMUX)
+#   NO_FMUX     = raw (canonical ntHash >> 11), ablation (-DFASTKMV_NO_FMUX)
+option(FASTKMV_NO_FMUX "FastKMV: skip fmix (raw ntHash keys)" OFF)
+option(FASTKMV_DOUBLE_FMUX "FastKMV: two-round fmix instead of one" OFF)
 #SET(CMAKE_CXX_COMPILER /usr/bin/g++)
 #SET(CMAKE_C_COMPILER /usr/bin/gcc)
 
@@ -16,10 +22,22 @@ list(REMOVE_ITEM DIR_SRCS "src/treeminhash.cpp")
 # Optional LTO (same compiler for lib + app): cmake -DCMAKE_CXX_FLAGS="-flto ..." ...
 #linux only 
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -std=c++14 -static-libstdc++ -march=native")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g1 -std=c++20 -fopenmp -march=native -fPIC -DNDEBUG -funroll-loops")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g0 -std=c++20 -fopenmp -march=native -fPIC -DNDEBUG -funroll-loops")
 
 #set flags for specific files
 #set_source_files_properties(src/MinHash.cpp PROPERTIES COMPILE_FLAGS -mavx2)
+if(FASTKMV_NO_FMUX AND FASTKMV_DOUBLE_FMUX)
+	message(FATAL_ERROR "FASTKMV_NO_FMUX and FASTKMV_DOUBLE_FMUX are mutually exclusive")
+endif()
+# Always refresh so toggling options does not leave stale -D flags on fastkmv.cpp
+if(FASTKMV_NO_FMUX)
+	set_source_files_properties(src/fastkmv.cpp PROPERTIES COMPILE_DEFINITIONS FASTKMV_NO_FMUX)
+elseif(FASTKMV_DOUBLE_FMUX)
+	set_source_files_properties(src/fastkmv.cpp PROPERTIES COMPILE_DEFINITIONS FASTKMV_DOUBLE_FMUX)
+else()
+	# Clear per-file defs (no value = remove property; portable vs. unset_property)
+	set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/fastkmv.cpp" PROPERTY COMPILE_DEFINITIONS)
+endif()
 
 
 if (CXXAPI)
