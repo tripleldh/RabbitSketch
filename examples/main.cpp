@@ -41,11 +41,7 @@ int main(int argc, char* argv[])
 	parameter.b = (double *)malloc(parameter.sketchSize * pow(parameter.kmerSize, 4) * sizeof(double));
 	getCWS(parameter.r, parameter.c, parameter.b, parameter.sketchSize, pow(parameter.kmerSize, 4));
 
-	int half_k = 10;
-	int half_subk = 6;
-	int drlevel = 3;
-
-	Sketch::kssd_parameter_t kssdPara(half_k, half_subk, drlevel, "shuf_file/L3K10.shuf");
+	Sketch::kssd_parameter_t kssdPara; // half_k=10, half_subk=6, drlevel=3
 	vector<Sketch::Kssd *> vkssd;
 	vector<Sketch::WMinHash *> vwmh; 
 	vector<Sketch::MinHash *> vmh; 

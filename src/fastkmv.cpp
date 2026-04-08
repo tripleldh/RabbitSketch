@@ -464,8 +464,30 @@ void FastKMV::update(const char* seq, uint64_t length) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// jaccard  –  standard KMV bottom-k intersection estimator
+// jaccard  –  SIMD-accelerated KMV bottom-k intersection estimator
+//
+// Sorted-set intersection via rotational comparison:
+//   AVX-512: 8-wide (8×8 all-pairs per iteration)
+//   AVX2:    4-wide (4×4 all-pairs per iteration)
+//   Scalar fallback for remainder / small sketches.
 // ═══════════════════════════════════════════════════════════════════════════
+
+static uint64_t fkmv_scalar_intersect(const uint64_t* list1, uint64_t size1,
+                                      const uint64_t* list2, uint64_t size2,
+                                      uint64_t budget,
+                                      uint64_t* i_a, uint64_t* i_b)
+{
+    uint64_t counter = 0;
+    *i_a = 0;
+    *i_b = 0;
+    while (*i_a < size1 && *i_b < size2 && budget > 0) {
+        if (list1[*i_a] < list2[*i_b])      { ++(*i_a); }
+        else if (list1[*i_a] > list2[*i_b]) { ++(*i_b); }
+        else { ++counter; ++(*i_a); ++(*i_b); }
+        --budget;
+    }
+    return counter;
+}
 
 double FastKMV::jaccard(const FastKMV& other) const {
     assert(k_ == other.k_);
@@ -474,35 +496,115 @@ double FastKMV::jaccard(const FastKMV& other) const {
 
     const uint64_t* __restrict__ a = vals_.get();
     const uint64_t* __restrict__ b = other.vals_.get();
-    const uint32_t sa = size_;
-    const uint32_t sb = other.size_;
+    const uint64_t sa = size_;
+    const uint64_t sb = other.size_;
+    const uint64_t k  = k_;
 
-    uint32_t ia = 0, ib = 0;
-    int distinct = 0, common = 0;
+    if (sa == 0 || sb == 0) return 0.0;
 
-    while (static_cast<uint32_t>(distinct) < k_ && ia < sa && ib < sb) {
-        if (a[ia] == UINT64_MAX || b[ib] == UINT64_MAX) break;
-        if (a[ia] == b[ib]) {
-            ++common;
-            ++distinct;
-            ++ia;
-            ++ib;
-        } else if (a[ia] < b[ib]) {
-            ++distinct;
-            ++ia;
-        } else {
-            ++distinct;
-            ++ib;
+    uint64_t ia = 0, ib = 0;
+    uint64_t common = 0;
+
+#if defined(__AVX512F__)
+    {
+        const uint64_t st_a = (sa / 8) * 8;
+        const uint64_t st_b = (sb / 8) * 8;
+
+        if (k > 8 && st_a > 0 && st_b > 0) {
+            const uint64_t stop = k - 8;
+
+            __m512i sv0 = _mm512_set_epi64(0,7,6,5,4,3,2,1);
+            __m512i sv1 = _mm512_set_epi64(1,0,7,6,5,4,3,2);
+            __m512i sv2 = _mm512_set_epi64(2,1,0,7,6,5,4,3);
+            __m512i sv3 = _mm512_set_epi64(3,2,1,0,7,6,5,4);
+            __m512i sv4 = _mm512_set_epi64(4,3,2,1,0,7,6,5);
+            __m512i sv5 = _mm512_set_epi64(5,4,3,2,1,0,7,6);
+            __m512i sv6 = _mm512_set_epi64(6,5,4,3,2,1,0,7);
+
+            while (ia < st_a && ib < st_b) {
+                __m512i va = _mm512_loadu_si512(&a[ia]);
+                __m512i vb = _mm512_loadu_si512(&b[ib]);
+
+                uint64_t a_max = a[ia + 7];
+                uint64_t b_max = b[ib + 7];
+
+                ia += (a_max <= b_max) * 8;
+                ib += (a_max >= b_max) * 8;
+
+                __mmask8 cmp0 = _mm512_cmpeq_epu64_mask(va, vb);
+                __mmask8 cmp1 = _mm512_cmpeq_epu64_mask(va, _mm512_permutexvar_epi64(sv0, vb));
+                __mmask8 cmp2 = _mm512_cmpeq_epu64_mask(va, _mm512_permutexvar_epi64(sv1, vb));
+                __mmask8 cmp3 = _mm512_cmpeq_epu64_mask(va, _mm512_permutexvar_epi64(sv2, vb));
+                __mmask8 cmpA = cmp0 | cmp1 | cmp2 | cmp3;
+
+                __mmask8 cmp4 = _mm512_cmpeq_epu64_mask(va, _mm512_permutexvar_epi64(sv3, vb));
+                __mmask8 cmp5 = _mm512_cmpeq_epu64_mask(va, _mm512_permutexvar_epi64(sv4, vb));
+                __mmask8 cmp6 = _mm512_cmpeq_epu64_mask(va, _mm512_permutexvar_epi64(sv5, vb));
+                __mmask8 cmp7 = _mm512_cmpeq_epu64_mask(va, _mm512_permutexvar_epi64(sv6, vb));
+                __mmask8 cmpB = cmp4 | cmp5 | cmp6 | cmp7;
+
+                __mmask8 hits = cmpA | cmpB;
+                common += _mm_popcnt_u64(hits);
+
+                if (ia + ib - common >= stop) {
+                    common -= _mm_popcnt_u64(hits);
+                    ia -= (a_max <= b_max) * 8;
+                    ib -= (a_max >= b_max) * 8;
+                    break;
+                }
+            }
         }
     }
-    while (static_cast<uint32_t>(distinct) < k_ && ia < sa && a[ia] != UINT64_MAX) {
-        ++distinct;
-        ++ia;
+#elif defined(__AVX2__)
+    {
+        const uint64_t st_a = (sa / 4) * 4;
+        const uint64_t st_b = (sb / 4) * 4;
+
+        if (k > 8 && st_a > 0 && st_b > 0) {
+            const uint64_t stop = k - 8;
+
+            while (ia < st_a && ib < st_b) {
+                __m256i va = _mm256_loadu_si256((const __m256i*)&a[ia]);
+                __m256i vb = _mm256_loadu_si256((const __m256i*)&b[ib]);
+
+                uint64_t a_max = a[ia + 3];
+                uint64_t b_max = b[ib + 3];
+
+                ia += (a_max <= b_max) * 4;
+                ib += (a_max >= b_max) * 4;
+
+                __m256i cmp1 = _mm256_cmpeq_epi64(va, vb);
+                __m256i rot1 = _mm256_permute4x64_epi64(vb, 0x39);
+                __m256i cmp2 = _mm256_cmpeq_epi64(va, rot1);
+                __m256i rot2 = _mm256_permute4x64_epi64(vb, 0x4E);
+                __m256i cmp3 = _mm256_cmpeq_epi64(va, rot2);
+                __m256i rot3 = _mm256_permute4x64_epi64(vb, 0x93);
+                __m256i cmp4 = _mm256_cmpeq_epi64(va, rot3);
+
+                __m256i combined = _mm256_or_si256(
+                    _mm256_or_si256(cmp1, cmp2),
+                    _mm256_or_si256(cmp3, cmp4));
+                int mask = _mm256_movemask_pd(_mm256_castsi256_pd(combined));
+                common += _mm_popcnt_u64(static_cast<unsigned>(mask));
+
+                if (ia + ib - common >= stop) break;
+            }
+        }
     }
-    while (static_cast<uint32_t>(distinct) < k_ && ib < sb && b[ib] != UINT64_MAX) {
-        ++distinct;
-        ++ib;
-    }
+#endif
+
+    // scalar remainder
+    uint64_t remaining = k - (ia + ib - common);
+    uint64_t ia_s, ib_s;
+    common += fkmv_scalar_intersect(a + ia, sa - ia, b + ib, sb - ib,
+                                    remaining, &ia_s, &ib_s);
+    ia += ia_s;
+    ib += ib_s;
+
+    uint64_t distinct = ia + ib - common;
+    while (distinct < k && ia < sa) { ++distinct; ++ia; }
+    while (distinct < k && ib < sb) { ++distinct; ++ib; }
+    if (distinct > k) distinct = k;
 
     return (distinct > 0) ? static_cast<double>(common) / static_cast<double>(distinct)
                           : 0.0;

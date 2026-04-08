@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include <queue>
 #include <algorithm>
-#include "robin_hood.h"
+#include "phmap.h"
 //#include "Kssd.h"
 #include <shuffle.h>
 #include <err.h>
@@ -109,10 +109,8 @@ namespace Sketch{
 			//size_t dict_size = (1LLU << (4*(half_k-drlevel))) / 64;
 			//uint64_t* dict = (uint64_t*)malloc(dict_size * sizeof(uint64_t));
 			//memset(dict, 0, dict_size * sizeof(uint64_t));
-			robin_hood::unordered_map<uint64_t, vector<uint32_t>> hash_map_arr;
-			//std::unordered_map<uint64_t, vector<uint32_t>> hash_map_arr;
-			//std::map<uint64_t, vector<uint32_t>> hash_map_arr;
-			for(size_t i = 0; i < sketches.size(); i++){
+		phmap::flat_hash_map<uint64_t, vector<uint32_t>> hash_map_arr;
+		for(size_t i = 0; i < sketches.size(); i++){
 				#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
 				for(size_t j = 0; j < sketches[i].hashList64.size(); j++){
 					uint64_t cur_hash = sketches[i].hashList64[j];
@@ -170,77 +168,43 @@ namespace Sketch{
 #endif
 		}
 		else{
-			size_t hashSize = 1LLU << (4 * (half_k - drlevel));
-			vector<vector<uint32_t>> hashMapId;
-			for(size_t i = 0; i < hashSize; i++){
-				hashMapId.push_back(vector<uint32_t>());
-			}
-			uint32_t* offsetArr = (uint32_t*)calloc(hashSize, sizeof(uint32_t));
-
-			//cout<<sketches.size()<<endl;
-			//cerr << "the hashSize is: " << hashSize << endl;
-			//cout<<sketches.size()<<endl;
-		//	for(size_t i = 0; i < sketches.size(); i++){
-		//		vector<uint32_t> local_hashList = sketches[i]->storeHashes();
-
-		//		//cerr << "the hashSize is: " << hashSize << endl;
-//#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
-		//		for(size_t j = 0; j < local_hashList.size(); j++){
-		//			uint32_t hash = local_hashList[j];
-		//			hashMapId[hash].push_back(i);
-		//		}
-		//	}
-
-		for (size_t i = 0; i < sketches.size(); i++){
-		    vector<uint32_t> local_hashList = sketches[i].hashList;
-		
-		#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
-		    for(size_t j = 0; j < local_hashList.size(); j++){
-		        uint32_t hash = local_hashList[j];
-		        if (hash >= hashSize) {
-		            #pragma omp critical
-		            {
-		                cerr << "Error: hash value " << hash << " is out of bounds (hashSize = " << hashSize << ")" << endl;
-		            }
-		            continue; // 或者根据需要处理这个错误
-		        }
-		        hashMapId[hash].push_back(i);
-		    }
-		}
-
-
-			double tt0 = get_sec();
-#ifdef Timer_inner
-			cerr << "the time of generate the idx by multiple threads are: " << tt0 - t0 << endl;
-#endif
-
-			FILE * fp0 = fopen(dictFile.c_str(), "w+");
-			uint64_t totalIndex = 0;
-			for(size_t hash = 0; hash < hashSize; hash++){
-				offsetArr[hash] = 0;
-				if(hashMapId[hash].size() != 0){
-					fwrite(hashMapId[hash].data(), sizeof(uint32_t), hashMapId[hash].size(), fp0);
-					totalIndex += hashMapId[hash].size();
-					offsetArr[hash] = hashMapId[hash].size();
+			// Sparse phmap avoids the ~6 GB dense-array allocation that
+			// vector<vector<uint32_t>>(1<<28) would require.
+			phmap::flat_hash_map<uint32_t, vector<uint32_t>> hash_map_arr;
+			for(size_t i = 0; i < sketches.size(); i++){
+				for(size_t j = 0; j < sketches[i].hashList.size(); j++){
+					auto [it, _] = hash_map_arr.try_emplace(sketches[i].hashList[j]);
+					it->second.push_back(static_cast<uint32_t>(i));
 				}
 			}
-			fclose(fp0);
+			size_t   hash_number   = hash_map_arr.size();
+			size_t   total_size    = 0;
+			uint32_t* hash_arr     = new uint32_t[hash_number];
+			uint32_t* hash_size_arr= new uint32_t[hash_number];
 
-			//cout << "cccccccccccccccccccccccccccc"<< endl;
-			double t1 = get_sec();
-#ifdef Timer_inner
-			cerr << "the time of merge multiple idx into final hashMap is: " << t1 - tt0 << endl;
-#endif
+			FILE* fp_dict = fopen(dictFile.c_str(), "w+");
+			if(!fp_dict){ cerr << "ERROR: transSketches, cannot open dictFile: " << dictFile << endl; exit(1); }
+			size_t cur_id = 0;
+			for(auto& x : hash_map_arr){
+				hash_arr[cur_id]      = x.first;
+				fwrite(x.second.data(), sizeof(uint32_t), x.second.size(), fp_dict);
+				hash_size_arr[cur_id] = static_cast<uint32_t>(x.second.size());
+				total_size           += x.second.size();
+				cur_id++;
+			}
+			fclose(fp_dict);
 
-			FILE * fp1 = fopen(indexFile.c_str(), "w+");
-			fwrite(&hashSize, sizeof(size_t), 1, fp1);
-			fwrite(&totalIndex, sizeof(uint64_t), 1, fp1);
-			fwrite(offsetArr, sizeof(uint32_t), hashSize, fp1);
-			double t2 = get_sec();
-			fclose(fp1);
-#ifdef Timer_inner
-			cerr << "the time of write output file is: " << t2 - t1 << endl;
-#endif
+			// Sparse index: hash_number | hash_arr(uint32_t×N) | hash_size_arr(uint32_t×N)
+			FILE* fp_index = fopen(indexFile.c_str(), "w+");
+			if(!fp_index){ cerr << "ERROR: transSketches, cannot open indexFile: " << indexFile << endl; exit(1); }
+			fwrite(&hash_number,    sizeof(size_t),   1,            fp_index);
+			fwrite(hash_arr,        sizeof(uint32_t),  hash_number,  fp_index);
+			fwrite(hash_size_arr,   sizeof(uint32_t),  hash_number,  fp_index);
+			fclose(fp_index);
+			delete[] hash_arr;
+			delete[] hash_size_arr;
+			cerr << "transSketches(32): unique hashes = " << hash_number
+			     << "  total_size = " << total_size << endl;
 		}
 
 		//cerr << "the hashSize is: " << hashSize << endl;
@@ -616,7 +580,7 @@ namespace Sketch{
 		}
 
 		//cerr << "hashList.size() is: " << hashList.size() << endl;
-		unordered_set<uint32_t>().swap(hashSet);//release the memory of hashSet.
+		phmap::flat_hash_set<uint32_t>().swap(hashSet); // release memory
 		std::sort(hashList.begin(), hashList.end());
 	}
 
@@ -644,7 +608,7 @@ namespace Sketch{
 		}
 
 		//cerr << "hashList.size() is: " << hashList.size() << endl;
-		unordered_set<uint64_t>().swap(hashSet64);//release the memory of hashSet.
+		phmap::flat_hash_set<uint64_t>().swap(hashSet64); // release memory
 		std::sort(hashList64.begin(), hashList64.end());
 	}
 
@@ -668,53 +632,62 @@ namespace Sketch{
 	}
 
 	void Kssd::update(const char* seq){
-		uint64_t tuple = 0LLU, rvs_tuple = 0LLU, uni_tuple, dr_tuple, pfilter;
+		const int length = strlen(seq);
+		if (length < kmer_size) return;
+
+		// Pre-compute loop-invariant constants
+		const int shift        = kmer_size * 2 - half_outctx_len * 4;
+		const int dom_shift    = half_outctx_len * 2;
+		const int dr_shift     = drlevel_ * 4;
+
+		// Adaptive pre-allocation: estimate surviving k-mers
+		const int n_kmers      = length - kmer_size + 1;
+		const double ratio     = static_cast<double>(dim_end - dim_start) / (1 << (4 * half_subk_));
+		const int estimated    = static_cast<int>(n_kmers * ratio * 0.85) + 64;
+
+		if (use64) {
+			if (hashSet64.capacity() < static_cast<size_t>(estimated))
+				hashSet64.reserve(estimated);
+		} else {
+			if (hashSet.capacity() < static_cast<size_t>(estimated))
+				hashSet.reserve(estimated);
+		}
+
+		uint64_t tuple = 0LLU, rvs_tuple = 0LLU;
 		int base = 1;
-		int length = strlen(seq);
 
 		for (int i = 0; i < length; i++) {
-			char ch = seq[i];
-			int basenum = (ch < 128) ? BaseMap[(int)ch] : -1;
-			if (basenum != -1) {
-				tuple = ((tuple << 2) | basenum) & tupmask;
+			const int basenum = BaseMap[(unsigned char)seq[i]];
+			if (__builtin_expect(basenum != -1, 1)) {
+				tuple     = ((tuple << 2) | basenum) & tupmask;
 				rvs_tuple = (rvs_tuple >> 2) + (((uint64_t)basenum ^ 3LLU) << rev_add_move);
 				base++;
+
+				if (__builtin_expect(base > kmer_size, 0)) {
+					const uint64_t uni_tuple = (tuple < rvs_tuple) ? tuple : rvs_tuple;
+					const uint32_t dim_id    = static_cast<uint32_t>((uni_tuple & domask) >> dom_shift);
+
+					auto it = shuffled_map.find(dim_id);
+					if (it == shuffled_map.end()) continue;
+
+					const uint64_t dr_tuple =
+						(((uni_tuple & undomask0) |
+						  ((uni_tuple & undomask1) << shift)) >> dr_shift)
+						| static_cast<uint64_t>(it->second - dim_start);
+
+					if (use64) hashSet64.emplace(dr_tuple);
+					else        hashSet.emplace(dr_tuple);
+				}
 			} else {
-				base = 1;
-			}
-
-			if (base > kmer_size) {
-				uni_tuple = (tuple < rvs_tuple) ? tuple : rvs_tuple;
-				int dim_id = (uni_tuple & domask) >> (half_outctx_len * 2);
-
-				auto it = shuffled_map.find(dim_id);
-				if (it == shuffled_map.end()) {
-					continue;
-				}
-				pfilter = it->second;
-				pfilter -= dim_start;
-
-				dr_tuple = (((uni_tuple & undomask0) |
-							((uni_tuple & undomask1) << (kmer_size * 2 - half_outctx_len * 4))) >>
-						(drlevel_ * 4)) | pfilter;
-
-				if (use64)
-				{hashSet64.insert(dr_tuple);
-					cout<<"lallala"<<endl;
-				}
-				else
-					hashSet.insert(dr_tuple);
+				// Invalid base: reset sliding window
+				base      = 1;
+				tuple     = 0LLU;
+				rvs_tuple = 0LLU;
 			}
 		}
-		if (use64){
-			SetToList64();
-			cout<<"enennene"<<endl;
-		}
-		else
-			SetToList();
 
-		//	if(hashList.size() > hashLimit)
-		//				fprintf(stderr, "the context space is too crowd, try rerun the program using -k %d\n", half_k_ + 1);
+		if (use64) SetToList64();
+		else        SetToList();
 	}
 
 
@@ -777,8 +750,8 @@ namespace Sketch{
 		string indexFile = refSketchOut + ".index";
 		string dictFile = refSketchOut + ".dict";
 		bool use64 = info.half_k - info.drlevel > 8 ? true : false;
-		robin_hood::unordered_map<uint64_t, vector<uint32_t>> hash_map_arr;
-		uint32_t* sketchSizeArr = NULL;
+	phmap::flat_hash_map<uint64_t, vector<uint32_t>> hash_map_arr;
+	uint32_t* sketchSizeArr = NULL;
 		size_t* offset = NULL;
 		uint32_t* indexArr = NULL;
 		//uint64_t* dict;
@@ -832,51 +805,36 @@ namespace Sketch{
 		}
 		else
 		{
-			cerr << "-----not use hash64 in index_tridist() " << endl;
-			size_t hashSize;
-			uint64_t totalIndex;
-			FILE * fp_index = fopen(indexFile.c_str(), "rb");
-			if(!fp_index){
-				cerr << "ERROR: index_tridist(), cannot open the index sketch file: " << indexFile << endl;
-				exit(1);
-			}
-			int read_hash_size = fread(&hashSize, sizeof(size_t), 1, fp_index);
-			int read_total_index = fread(&totalIndex, sizeof(uint64_t), 1, fp_index);
-			//sketchSizeArr = (uint32_t*)malloc(hashSize * sizeof(uint32_t));
-			sketchSizeArr = new uint32_t[hashSize];
-			size_t read_sketch_size_arr = fread(sketchSizeArr, sizeof(uint32_t), hashSize, fp_index);
-
-			//offset = (size_t*)malloc(hashSize * sizeof(size_t));
-			offset = new size_t[hashSize];
-			uint64_t totalHashNumber = 0;
-			for(size_t i = 0; i < hashSize; i++){
-				totalHashNumber += sketchSizeArr[i];
-				offset[i] = sketchSizeArr[i];
-				if(i > 0) offset[i] += offset[i-1];
-			}
-			if(totalHashNumber != totalIndex){
-				cerr << "ERROR: index_tridist(), mismatched total hash number" << endl;
-				exit(1);
+			// Read sparse index (written by the new transSketches):
+			// hash_number(size_t) | hash_arr(uint32_t×N) | hash_size_arr(uint32_t×N)
+			cerr << "-----not use hash64 in index_tridist() (sparse format)" << endl;
+			size_t hash_number32;
+			FILE* fp_index = fopen(indexFile.c_str(), "rb");
+			if(!fp_index){ cerr << "ERROR: index_tridist(), cannot open index file: " << indexFile << endl; exit(1); }
+			if(fread(&hash_number32, sizeof(size_t), 1, fp_index) != 1){ cerr << "ERROR: read hash_number" << endl; exit(1); }
+			uint32_t* hash_arr32      = new uint32_t[hash_number32];
+			uint32_t* hash_size_arr32 = new uint32_t[hash_number32];
+			if(fread(hash_arr32,      sizeof(uint32_t), hash_number32, fp_index) != hash_number32 ||
+			   fread(hash_size_arr32, sizeof(uint32_t), hash_number32, fp_index) != hash_number32){
+				cerr << "ERROR: index_tridist(), error reading index" << endl; exit(1);
 			}
 			fclose(fp_index);
 
-			//cerr << "the hashSize is: " << hashSize << endl;
-			//cerr << "totalIndex is: " << totalIndex << endl;
-			//cerr << "totalHashNumber is: " << totalHashNumber << endl;
-			//cerr << "offset[n-1] is: " << offset[hashSize-1] << endl;;
-
-			//indexArr = (uint32_t*)malloc(totalHashNumber * sizeof(uint32_t));
-			indexArr = new uint32_t[totalHashNumber];
-			FILE * fp_dict = fopen(dictFile.c_str(), "rb");
-			if(!fp_dict){
-				cerr << "ERROR: index_tridist(), cannot open the dictionary sketch file: " << dictFile << endl;
-				exit(1);
+			FILE* fp_dict = fopen(dictFile.c_str(), "rb");
+			if(!fp_dict){ cerr << "ERROR: index_tridist(), cannot open dict file: " << dictFile << endl; exit(1); }
+			uint32_t buf_cap = 1 << 20;
+			uint32_t* buf = new uint32_t[buf_cap];
+			for(size_t i = 0; i < hash_number32; i++){
+				uint32_t sz = hash_size_arr32[i];
+				if(sz > buf_cap){ buf_cap = sz * 2; delete[] buf; buf = new uint32_t[buf_cap]; }
+				if(fread(buf, sizeof(uint32_t), sz, fp_dict) != sz){ cerr << "ERROR: read dict" << endl; exit(1); }
+				hash_map_arr.insert({(uint64_t)hash_arr32[i],
+				                     vector<uint32_t>(buf, buf + sz)});
 			}
-			size_t read_index_arr = fread(indexArr, sizeof(uint32_t), totalHashNumber, fp_dict);
-			if(read_hash_size != 1 || read_total_index != 1 || read_sketch_size_arr != hashSize || read_index_arr != totalHashNumber){
-				cerr << "ERROR: index_tridist(), error read hash_size, total_index, sketch_size_arr, index_arr" << endl;
-				exit(1);
-			}
+			delete[] buf;
+			delete[] hash_arr32;
+			delete[] hash_size_arr32;
+			fclose(fp_dict);
 		}
 
 #ifdef Timer
@@ -946,13 +904,10 @@ namespace Sketch{
 			else{
 				for(size_t j = 0; j < sketcharr.size(); j++){
 					uint32_t hash = sketcharr[j];
-					if(sketchSizeArr[hash] == 0) continue;
-					size_t start = hash > 0 ? offset[hash-1] : 0;
-					size_t end = offset[hash];
-					for(size_t k = start; k < end; k++){
-						size_t curIndex = indexArr[k];
-						intersectionArr[tid][curIndex]++;
-					}
+					auto it32 = hash_map_arr.find((uint64_t)hash);
+					if(it32 == hash_map_arr.end()) continue;
+					for(uint32_t cur_index : it32->second)
+						intersectionArr[tid][cur_index]++;
 				}
 			}
 

@@ -129,8 +129,8 @@ struct ExpVar {
 		for (int i = 0; i < 8; i++) {
 			maxX[i] = 88;
 			minX[i] = -88;
-			a[i] = n / log_2;
-			b[i] = log_2 / n;
+			a[i] = static_cast<float>(n) / log_2;
+				b[i] = log_2 / static_cast<float>(n);
 			f1[i] = 1.0f;
 			i127s[i] = 127 << s;
 			i7fffffff[i] = 0x7fffffff;
@@ -138,7 +138,7 @@ struct ExpVar {
 		}
 
 		for (int i = 0; i < n; i++) {
-			float y = pow(2.0f, (float)i / n);
+			float y = pow(2.0f, (float)i / static_cast<float>(n));
 			fi fi;
 			fi.f = y;
 			tbl[i] = fi.i & mask(23);
@@ -161,7 +161,7 @@ struct ExpdVar {
 	double a;
 	double ra;
 	ExpdVar()
-		: a(s / ::log(2.0))
+		: a(static_cast<double>(s) / ::log(2.0))
 		, ra(1 / a)
 	{
 		for (int i = 0; i < 2; i++) {
@@ -177,7 +177,7 @@ struct ExpdVar {
 		}
 		for (int i = 0; i < s; i++) {
 			di di;
-			di.d = ::pow(2.0, i * (1.0 / s));
+			di.d = ::pow(2.0, i * (1.0 / static_cast<double>(s)));
 			tbl[i] = di.i & mask64(52);
 		}
 	}

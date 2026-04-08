@@ -1,6 +1,7 @@
 #ifndef Sketch_H
 #define Sketch_H
 #include "shuffle.h"
+#include "phmap.h"
 #include <map>
 #include <vector>
 #include <string>
@@ -275,48 +276,64 @@ namespace Sketch{
     uint64_t tupmask;
     uint64_t undomask0;
     uint64_t undomask1;
-    robin_hood::unordered_map<uint32_t, int> shuffled_map;
+    phmap::flat_hash_map<uint32_t, int> shuffled_map;
 
-    kssd_parameter_t(int half_k_, int half_subk_, int drlevel_, string shuffle_file)
-      : 
-        half_k(half_k_),
-        half_subk(half_subk_),
-        drlevel(drlevel_),
-        //shuffled_dim(shuffled_dim_),
+  private:
+    // shared init: compute bit-masks and populate shuffled_map from shuffled_dim
+    void _init_masks_and_map() {
+      int comp_bittl = 64 - 4 * half_k;
+      tupmask   = _64MASK >> comp_bittl;
+      domask    = (tupmask >> (4 * half_outctx_len)) << (2 * half_outctx_len);
+      uint64_t undomask = (tupmask ^ domask) & tupmask;
+      undomask1 = undomask & (tupmask >> ((half_k + half_subk) * 2));
+      undomask0 = undomask ^ undomask1;
+      int dim_size  = 1 << (4 * half_subk);
+      int dim_limit = 1 << (4 * (half_subk - drlevel));
+      shuffled_map.reserve(dim_size);
+      for (int t = 0; t < dim_size; t++) {
+        if (shuffled_dim[t] >= 0 && shuffled_dim[t] < dim_limit)
+          shuffled_map.emplace(t, shuffled_dim[t]);
+      }
+    }
+
+  public:
+    // ── Constructor 1: no shuffle file required (recommended) ──────────────
+    // The shuffle dictionary is generated in memory with the fixed canonical
+    // seed (348842630), guaranteeing reproducible results without extra files.
+    kssd_parameter_t(int half_k_ = 10, int half_subk_ = 6, int drlevel_ = 3)
+      : half_k(half_k_), half_subk(half_subk_), drlevel(drlevel_),
         half_outctx_len(half_k_ - half_subk_),
         rev_add_move(4 * half_k_ - 2),
         kmer_size(2 * half_k_),
         dim_start(0),
-        dim_end(1 << 4 * (half_subk - drlevel)),
-        hashSize(2000), 
-        hashLimit(2000 * LD_FCTR)
+        dim_end(1 << (4 * (half_subk_ - drlevel_))),
+        hashSize(2000), hashLimit(static_cast<int>(2000 * LD_FCTR))
     {
-      if (half_subk_ - drlevel_ < 3) {
-        std::cerr << "Error: the half_subk - drlevel should be at least 3. Current half_subk and drlevel are: "
-          << half_subk_ << " and " << drlevel_ << " respectively." << std::endl;
-        throw std::invalid_argument("Invalid parameters for kssd_parameter_t");
-      }
+      if (half_subk_ - drlevel_ < 3)
+        throw std::invalid_argument(
+          "kssd_parameter_t: half_subk - drlevel must be >= 3");
+      shuffled_dim = generate_shuffle_dim(half_subk_);
+      _init_masks_and_map();
+    }
 
-      auto result = Sketch::read_shuffled_file(shuffle_file);
-      //half_k = std::get<0>(result);
-      //half_subk = std::get<1>(result);
-      //drlevel = std::get<2>(result);
+    // ── Constructor 2: load shuffle dictionary from file (legacy) ──────────
+    [[deprecated("Use the 3-argument constructor; shuffle file is no longer needed.")]]
+    kssd_parameter_t(int half_k_, int half_subk_, int drlevel_,
+                     const string& shuffle_file)
+      : half_k(half_k_), half_subk(half_subk_), drlevel(drlevel_),
+        half_outctx_len(half_k_ - half_subk_),
+        rev_add_move(4 * half_k_ - 2),
+        kmer_size(2 * half_k_),
+        dim_start(0),
+        dim_end(1 << (4 * (half_subk_ - drlevel_))),
+        hashSize(2000), hashLimit(static_cast<int>(2000 * LD_FCTR))
+    {
+      if (half_subk_ - drlevel_ < 3)
+        throw std::invalid_argument(
+          "kssd_parameter_t: half_subk - drlevel must be >= 3");
+      auto result  = Sketch::read_shuffled_file(shuffle_file);
       shuffled_dim = std::get<3>(result);
-      int comp_bittl = 64 - 4 * half_k;
-      tupmask = _64MASK >> comp_bittl;
-      domask = (tupmask >> (4 * half_outctx_len)) << (2 * half_outctx_len);
-      uint64_t undomask = (tupmask ^ domask) & tupmask;
-      undomask1 = undomask & (tupmask >> ((half_k + half_subk) * 2));
-      undomask0 = undomask ^ undomask1;
-      int dim_size = 1 << (4 * half_subk);
-
-      for (int t = 0; t < dim_size; t++) {
-        if (shuffled_dim[t] < (1 << (4 * (half_subk - drlevel_))) && shuffled_dim[t] >= 0) { // ensure dim_start = 0
-          shuffled_map[t] = shuffled_dim[t];
-          //		std::cout << "Inserted into shuffled_map: " << t << " -> " << shuffled_dim[t] << std::endl;
-        }
-      }
-
+      _init_masks_and_map();
     }
   };
 
@@ -381,8 +398,8 @@ namespace Sketch{
       Kssd& operator=(Kssd&&) = default;
 
       ~Kssd() = default;
-      std::unordered_set<uint32_t> hashSet;
-      std::unordered_set<uint64_t> hashSet64;
+      phmap::flat_hash_set<uint32_t> hashSet;
+      phmap::flat_hash_set<uint64_t> hashSet64;
       std::vector<uint64_t> hashList64;
       std::vector<uint32_t> hashList;
 
@@ -449,7 +466,7 @@ namespace Sketch{
 
       static const int BaseMap[128]; 
 
-      robin_hood::unordered_map<uint32_t, int> shuffled_map;
+      phmap::flat_hash_map<uint32_t, int> shuffled_map;
 
   };
 

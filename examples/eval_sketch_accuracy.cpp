@@ -48,8 +48,6 @@
 
 #include <omp.h>
 #include <sys/time.h>
-#include <sys/stat.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -247,16 +245,8 @@ int main(int argc, char* argv[])
     if (pairs_per_rate < 1) pairs_per_rate = 1;
     if (numThreads < 1) numThreads = 1;
 
-    // ── KSSD shuffle file ──────────────────────────────────────────────────
-    const char* shuf_path = "shuf_file/L3K10.shuf";
-    struct stat st;
-    if (stat(shuf_path, &st) != 0) {
-        fprintf(stderr,
-                "ERROR: KSSD shuffle file not found: %s\n"
-                "       Run from the examples/ directory.\n", shuf_path);
-        return 1;
-    }
-    Sketch::kssd_parameter_t kssdPara(10, 6, 3, shuf_path);
+    // ── KSSD parameters (shuffle dictionary generated in memory) ───────────
+    Sketch::kssd_parameter_t kssdPara; // half_k=10, half_subk=6, drlevel=3
 
     vector<double> rates = {0.001, 0.005, 0.01, 0.02, 0.05,
                             0.1,   0.15,  0.2,  0.25, 0.3};

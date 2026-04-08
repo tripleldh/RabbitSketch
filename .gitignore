@@ -38,3 +38,4 @@ examples/run_pmh_weighted_len_sweep.sh
 examples/run_rabbitsketch_eval.sh
 examples/run_rabbitsketch_file_eval.sh
 examples/test_TMH.cpp
+examples/result.*
