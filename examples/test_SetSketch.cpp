@@ -90,7 +90,7 @@ int main(int argc, char* argv[])
   cerr << "===== total files: " << n << " (SetSketch, optimized)" << endl;
 
   // ── Phase 0: pre-allocate sketches (serial, ~0.1 s) ────────────────────────
-  static const int BITS = 10;
+  static const int BITS = 13;
   vector<Sketch::SetSketch> vsketch;
   vsketch.reserve(n);
   for (int i = 0; i < n; i++)

@@ -40,7 +40,7 @@ int main(int argc, char* argv[])
   cerr << "===== total files: " << n << " (HyperLogLog, optimized)" << endl;
 
   // ── Phase 0: pre-allocate sketches ──────────────────────────────────────────
-  static const int BITS = 10;
+  static const int BITS = 13;
   vector<Sketch::HyperLogLog> vhlog;
   vhlog.reserve(n);
   for (int i = 0; i < n; i++)
