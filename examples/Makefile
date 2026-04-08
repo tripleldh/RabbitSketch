@@ -53,5 +53,8 @@ exe_test_TopLProbMinHash: test_TopLProbMinHash.cpp ../src/probmh.cpp
 exe_eval_sketch_acc: eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp
 	$(CXX) $(CXXFLAGS) -I ../src eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp -o exe_eval_sketch_acc $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
+exe_test_ani_containment: test_ani_containment.cpp ../src/probmh.cpp ../src/fastkmv.cpp
+	$(CXX) $(CXXFLAGS) -I ../src test_ani_containment.cpp ../src/probmh.cpp ../src/fastkmv.cpp -o exe_test_ani_containment $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+
 clean:
 	rm -f *.o exe_*

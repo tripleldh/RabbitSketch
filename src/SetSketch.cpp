@@ -458,6 +458,28 @@ void SetSketch::update(char* seq) {
   is_calculated_ = loc_is_calc;
 }
 
+// ── containment ──────────────────────────────────────────────────────────────
+// C(this ⊆ other) = (|A| + |B| - |AUB|) / |A|
+double SetSketch::containment(const SetSketch& other) const
+{
+  const double card_a = cardinality();
+  if (card_a <= 0.0) return 0.0;
+  const double card_b = other.cardinality();
+  const double us     = union_size(other);
+  const double inter  = card_a + card_b - us;
+  return (inter > 0.0) ? inter / card_a : 0.0;
+}
+
+// ── ani ──────────────────────────────────────────────────────────────────────
+// ANI = (2J / (1+J))^(1/kmer_size)   (Mash / Ondov et al. 2016)
+double SetSketch::ani(const SetSketch& other, int kmer_size) const
+{
+  const double j = jaccard_index(other);
+  if (j <= 0.0) return 0.0;
+  if (j >= 1.0) return 1.0;
+  return std::pow(2.0 * j / (1.0 + j), 1.0 / static_cast<double>(kmer_size));
+}
+
 #undef ENC
 #undef COMP
 #undef VALID

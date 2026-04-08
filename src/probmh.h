@@ -150,6 +150,25 @@ public:
     }
 
     /**
+     * Weighted containment of *this in other: weighted_intersection / weight_A.
+     *   C_w(A⊆B) = J_w * (w_A + w_B) / (w_A * (1 + J_w))
+     * Requires total_weight() > 0.
+     */
+    double containment(const ProbMinHash4& other) const;
+
+    /**
+     * Average Nucleotide Identity estimated from weighted Jaccard.
+     *   ANI = (2J / (1+J))^(1/kmer_size)
+     */
+    double ani(const ProbMinHash4& other) const;
+
+    /**
+     * Total accumulated weight inserted into this sketch (sum of all element weights).
+     * For unweighted update() calls each k-mer contributes weight 1.
+     */
+    double total_weight() const { return total_weight_; }
+
+    /**
      * Merge two sketches by taking element-wise minimum of hash values.
      * Both sketches must have the same parameters.
      */
@@ -187,6 +206,7 @@ private:
     int                kmer_size_;
     uint64_t           seed_;
     uint32_t           max_L_;    // Route C: max updates per element (m_ = unlimited)
+    double             total_weight_;  // accumulated sum of all element weights
 
     std::unique_ptr<TedParam[]> ted_params_;     // [m-1]
     double                      firstBoundaryInv_;

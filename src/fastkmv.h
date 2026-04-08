@@ -43,6 +43,25 @@ public:
         return 1.0 - jaccard(other);
     }
 
+    /**
+     * KMV cardinality estimate: (k-1) * KEY_MAX / tau_k.
+     * Returns the exact count when the sketch is not yet full.
+     */
+    double cardinality() const;
+
+    /**
+     * Containment of *this in other: |A ∩ B| / |A|.
+     * Uses the cardinality-based formula:
+     *   C(A⊆B) = J * (|A| + |B|) / (|A| * (1 + J))
+     */
+    double containment(const FastKMV& other) const;
+
+    /**
+     * Average Nucleotide Identity estimated from Jaccard similarity.
+     * ANI = (2J / (1+J))^(1/k)  where k is the k-mer size stored at build time.
+     */
+    double ani(const FastKMV& other) const;
+
     FastKMV merge(const FastKMV& other) const;
 
     const uint64_t* getRegisters() const { ensureSorted(); return vals_.get(); }

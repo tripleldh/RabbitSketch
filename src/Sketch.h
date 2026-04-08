@@ -830,6 +830,16 @@ namespace Sketch{
                               double min_jaccard,
                               double prefilter_factor = 0.3) const;
 
+      /// Containment of *this in other: |A ∩ B| / |A|.
+      ///   C(A⊆B) = (|A| + |B| - |AUB|) / |A|
+      /// Returns 0 if cardinality of this sketch is zero.
+      double containment(const HyperLogLog& other) const;
+
+      /// Average Nucleotide Identity estimated from Jaccard similarity.
+      ///   ANI = (2J / (1+J))^(1/kmer_size)
+      /// @param kmer_size  k-mer length used during sketching (default 32).
+      double ani(const HyperLogLog& other, int kmer_size = 32) const;
+
     protected:
       std::vector<uint8_t> core_;//sketchInfo; 
       mutable double value_; //cardinality

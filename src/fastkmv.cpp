@@ -25,6 +25,7 @@
 
 #include "fastkmv.h"
 #include "hash_int.h"
+#include <cmath>
 
 // Default: single fmix (faster). Define FASTKMV_DOUBLE_FMUX for two rounds (legacy).
 // Define FASTKMV_NO_FMUX to disable fmix entirely (raw ntHash keys; ablation test).
@@ -505,6 +506,52 @@ double FastKMV::jaccard(const FastKMV& other) const {
 
     return (distinct > 0) ? static_cast<double>(common) / static_cast<double>(distinct)
                           : 0.0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// cardinality  –  KMV estimator: (valid_k - 1) * KEY_MAX / tau_k
+// ═══════════════════════════════════════════════════════════════════════════
+
+double FastKMV::cardinality() const {
+    ensureSorted();
+    if (size_ == 0) return 0.0;
+    if (size_ == 1) return 1.0;
+    // vals_[size_-1] is the largest (= k-th minimum when sketch is full).
+    // For a partial sketch (size_ < k_) we know the exact count.
+    if (size_ < k_) return static_cast<double>(size_);
+    const uint64_t tau = vals_[k_ - 1];
+    if (tau == 0) return static_cast<double>(k_);
+    return static_cast<double>(k_ - 1) * static_cast<double>(KEY_MAX)
+           / static_cast<double>(tau);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// containment  –  C(this ⊆ other) = |A∩B| / |A|
+//   Uses cardinality-based formula:
+//     C = J * (cardA + cardB) / (cardA * (1 + J))
+// ═══════════════════════════════════════════════════════════════════════════
+
+double FastKMV::containment(const FastKMV& other) const {
+    const double card_a = cardinality();
+    if (card_a <= 0.0) return 0.0;
+    const double j = jaccard(other);
+    if (j <= 0.0) return 0.0;
+    const double card_b = other.cardinality();
+    // |AUB| = (cardA + cardB) / (1 + J)  =>  |A∩B| = J * |AUB|
+    return j * (card_a + card_b) / (card_a * (1.0 + j));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ani  –  Average Nucleotide Identity from Jaccard
+//   ANI = (2J / (1+J))^(1/k)   (Ondov et al. 2016 / Mash)
+// ═══════════════════════════════════════════════════════════════════════════
+
+double FastKMV::ani(const FastKMV& other) const {
+    const double j = jaccard(other);
+    if (j <= 0.0) return 0.0;
+    if (j >= 1.0) return 1.0;
+    return std::pow(2.0 * j / (1.0 + j),
+                    1.0 / static_cast<double>(kmer_size_));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

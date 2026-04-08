@@ -472,6 +472,7 @@ ProbMinHash4::ProbMinHash4(uint32_t m, int kmer_size, uint64_t seed,
                            uint32_t max_L)
     : m_(m), kmer_size_(kmer_size), seed_(seed),
       max_L_((max_L == 0) ? m : std::min(max_L, m)),
+      total_weight_(0.0),
       ted_params_(new TedParam[m - 1]),
       tracker_(m),
       perm_(m)
@@ -511,6 +512,7 @@ ProbMinHash4::ProbMinHash4(uint32_t m, int kmer_size, uint64_t seed,
 ProbMinHash4::ProbMinHash4(const ProbMinHash4& o)
     : m_(o.m_), kmer_size_(o.kmer_size_), seed_(o.seed_),
       max_L_(o.max_L_),
+      total_weight_(o.total_weight_),
       ted_params_(new TedParam[o.m_ - 1]),
       firstBoundaryInv_(o.firstBoundaryInv_),
       tracker_(o.m_),
@@ -529,6 +531,7 @@ ProbMinHash4& ProbMinHash4::operator=(ProbMinHash4 other) {
     std::swap(kmer_size_,        other.kmer_size_);
     std::swap(seed_,             other.seed_);
     std::swap(max_L_,            other.max_L_);
+    std::swap(total_weight_,     other.total_weight_);
     std::swap(ted_params_,       other.ted_params_);
     std::swap(firstBoundaryInv_, other.firstBoundaryInv_);
     Sketch::swap(tracker_,       other.tracker_);
@@ -542,6 +545,8 @@ ProbMinHash4& ProbMinHash4::operator=(ProbMinHash4 other) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void ProbMinHash4::addHash(uint64_t h, double weight) {
+    if (!(weight > 0.0)) return;
+    total_weight_ += weight;
     addHashFromRng(mc::murmur3_fmix(h, seed_), weight);
 }
 
@@ -622,6 +627,25 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
                                       double uniform_weight) {
     const int K = kmer_size_;
     if (length < static_cast<uint64_t>(K)) return;
+
+    // ── Accumulate total_weight_ (O(L) rolling-window pre-pass) ───────────
+    // For each valid k-mer position (no invalid bases in window), add weight.
+    {
+        int inv = 0;
+        for (int i = 0; i < K - 1; ++i)
+            if (!PMH_VALID(PMH_ENC(seq[i]))) ++inv;
+        const uint64_t n_kmers = length - static_cast<uint64_t>(K) + 1;
+        for (uint64_t pos = 0; pos < n_kmers; ++pos) {
+            if (!PMH_VALID(PMH_ENC(seq[pos + K - 1]))) ++inv;
+            if (inv == 0) {
+                double w = (weight_per_kmer_start != nullptr)
+                               ? weight_per_kmer_start[pos]
+                               : uniform_weight;
+                if (w > 0.0) total_weight_ += w;
+            }
+            if (!PMH_VALID(PMH_ENC(seq[pos]))) --inv;
+        }
+    }
 
     const uint64_t loc_seed = seed_;
 
@@ -870,12 +894,39 @@ double ProbMinHash4::jaccard(const ProbMinHash4& other) const {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// containment  –  weighted C(this ⊆ other)
+//   C_w(A⊆B) = J_w * (w_A + w_B) / (w_A * (1 + J_w))
+// ═══════════════════════════════════════════════════════════════════════════
+
+double ProbMinHash4::containment(const ProbMinHash4& other) const {
+    if (total_weight_ <= 0.0) return 0.0;
+    const double j = jaccard(other);
+    if (j <= 0.0) return 0.0;
+    const double w_b = other.total_weight_;
+    return j * (total_weight_ + w_b) / (total_weight_ * (1.0 + j));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ani  –  ANI from weighted Jaccard
+//   ANI = (2J / (1+J))^(1/kmer_size)   (Mash / Ondov et al. 2016)
+// ═══════════════════════════════════════════════════════════════════════════
+
+double ProbMinHash4::ani(const ProbMinHash4& other) const {
+    const double j = jaccard(other);
+    if (j <= 0.0) return 0.0;
+    if (j >= 1.0) return 1.0;
+    return std::pow(2.0 * j / (1.0 + j),
+                    1.0 / static_cast<double>(kmer_size_));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // merge  –  element-wise min; O(m) tracker rebuild (was O(m log m))
 // ═══════════════════════════════════════════════════════════════════════════
 
 ProbMinHash4 ProbMinHash4::merge(const ProbMinHash4& other) const {
     assert(m_ == other.m_ && kmer_size_ == other.kmer_size_);
     ProbMinHash4 ret(m_, kmer_size_, seed_);
+    ret.total_weight_ = total_weight_ + other.total_weight_;
 
     const double* __restrict__ a = tracker_.leaves();
     const double* __restrict__ b = other.tracker_.leaves();
