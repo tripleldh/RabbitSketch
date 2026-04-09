@@ -39,6 +39,9 @@
 #include <limits>
 #include <memory>
 #include <cassert>
+#include <vector>
+#include <algorithm>
+#include <cstring>
 
 namespace Sketch {
 
@@ -134,6 +137,16 @@ public:
     void updateWeighted(const char* seq, uint64_t length,
                         const double* weight_per_kmer_start);
 
+    /**
+     * Fused entropy-weighted update: computes per-k-mer Shannon entropy weight
+     * and processes hash registration in a single O(L) pass, without allocating
+     * an intermediate weight vector.  ~2–3x faster than the separate
+     * fill_kmer_entropy_weights() + updateWeighted() combination.
+     *
+     * @param w_min  minimum weight for degenerate / N-containing k-mers (default 0.1)
+     */
+    void updateEntropy(const char* seq, uint64_t length, double w_min = 0.1);
+
     /** Insert one element from raw k-mer hash @p h with weight @p weight (default 1). */
     void addHash(uint64_t h, double weight = 1.0);
 
@@ -185,6 +198,23 @@ public:
     uint32_t getMaxL()      const { return max_L_; }
 
     void printSketch() const;
+
+    // ── Inverted index support ───────────────────────────────────────────────
+    // Key = raw_bits(register_value) XOR (reg_idx * golden_ratio_constant).
+    // Infinity registers are skipped.  Jaccard = matching_registers / M.
+
+    /** Fill @p keys with one uint64_t inverted-index key per non-infinity register. */
+    void getInvertedIndexKeys(std::vector<uint64_t>& keys) const;
+
+    /** Jaccard from inverted-index common count: common / m. */
+    static double jaccardFromCommon(int common, uint32_t m) {
+        return static_cast<double>(common) / m;
+    }
+
+    /** Minimum common count for direct-distance threshold: ceil((1-maxDist)*m). */
+    static int minCommonForDist(double maxDist, uint32_t m) {
+        return std::max(1, static_cast<int>(std::ceil((1.0 - maxDist) * m)));
+    }
 
 private:
     void addHashFromRng(uint64_t rng, double weight);

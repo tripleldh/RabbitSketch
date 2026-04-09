@@ -851,6 +851,226 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// updateEntropy  –  fused single-pass entropy-weighted update
+//
+// Eliminates: (1) separate fill_kmer_entropy_weights() O(L) pass,
+//             (2) weight vector allocation (~32MB for 4Mbp),
+//             (3) total_weight_ pre-pass.
+// Entropy sliding window (bcnt[4]) is maintained alongside the k-mer
+// sliding window (fwd/rev/inv) at zero extra cache cost.
+// ═══════════════════════════════════════════════════════════════════════════
+
+void ProbMinHash4::updateEntropy(const char* seq, uint64_t length, double w_min) {
+    const int K = kmer_size_;
+    if (length < static_cast<uint64_t>(K)) return;
+
+    // ── n*log2(n) table (≤ K+1 doubles, hot in L1) ──────────────────────
+    double nlgn_tbl[33];
+    assert(K <= 32);
+    nlgn_tbl[0] = 0.0;
+    for (int n = 1; n <= K; ++n)
+        nlgn_tbl[n] = static_cast<double>(n) * std::log2(static_cast<double>(n));
+
+    const double inv_k  = 1.0 / static_cast<double>(K);
+    const double log2k  = std::log2(static_cast<double>(K));
+    const double escale = 0.5;  // 1 / max_H, max_H = log2(4) = 2
+
+    // ── Initialize k-mer + entropy sliding windows ──────────────────────
+    const uint64_t kmer_mask = (K == 32) ? ~0ULL : ((1ULL << (2 * K)) - 1);
+    uint64_t fwd = 0, rev = 0;
+    int inv  = 0;
+    int bcnt[4] = {0, 0, 0, 0};
+
+    for (int k = 0; k < K; ++k) {
+        uint8_t ef = PMH_ENC(seq[k]);
+        if (PMH_VALID(ef)) {
+            bcnt[ef]++;
+            fwd = (fwd << 2) | (ef & 3u);
+        } else {
+            inv++;
+            fwd = (fwd << 2);
+        }
+        uint8_t er = PMH_VALID(ef) ? PMH_COMP(ef) : 0u;
+        rev = (rev >> 2) | (static_cast<uint64_t>(er & 3u) << (2 * (K - 1)));
+    }
+
+    const uint64_t loc_seed = seed_;
+    const int      lanes    = 8;
+    const uint64_t N_body   = length - static_cast<uint64_t>(K);
+    const uint64_t N_batch  = (N_body >= 1) ? (N_body / lanes) * lanes : 0;
+    const double   loc_c1_0 = ted_params_[0].c1;
+
+    // ── Main batched loop (8 lanes) ─────────────────────────────────────
+    for (uint64_t i = 0; i < N_batch; i += lanes) {
+        uint64_t resv[8];
+        bool     lane_valid[8];
+        double   batch_w[8];
+
+        for (int j = 0; j < lanes; ++j) {
+            const uint64_t pos = i + static_cast<uint64_t>(j);
+
+            lane_valid[j] = (inv == 0);
+            resv[j] = lane_valid[j] ? ((fwd <= rev) ? fwd : rev) : 0;
+
+            if (inv == 0) {
+                double H  = log2k - inv_k * (nlgn_tbl[bcnt[0]] + nlgn_tbl[bcnt[1]] +
+                                              nlgn_tbl[bcnt[2]] + nlgn_tbl[bcnt[3]]);
+                double wt = H * escale;
+                batch_w[j] = (wt < w_min) ? w_min : wt;
+                total_weight_ += batch_w[j];
+            } else {
+                batch_w[j] = 0.0;
+            }
+
+            // Advance k-mer window
+            uint8_t ef_out = PMH_ENC(seq[pos]);
+            uint8_t ef_in  = PMH_ENC(seq[pos + K]);
+            if (PMH_VALID(ef_out)) { bcnt[ef_out]--; }
+            else                   { inv--; }
+            if (PMH_VALID(ef_in))  { bcnt[ef_in]++; fwd = ((fwd << 2) | (ef_in & 3u)) & kmer_mask; }
+            else                   { inv++;          fwd = ((fwd << 2)) & kmer_mask; }
+            uint8_t er_in = PMH_VALID(ef_in) ? (PMH_COMP(ef_in) & 3u) : 0u;
+            rev = (rev >> 2) | (static_cast<uint64_t>(er_in) << (2 * (K - 1)));
+        }
+
+        if (!(lane_valid[0]|lane_valid[1]|lane_valid[2]|lane_valid[3]|
+              lane_valid[4]|lane_valid[5]|lane_valid[6]|lane_valid[7])) continue;
+
+        // ── SIMD hash (identical to updateWeightedImpl) ─────────────────
+        uint64_t rng_innerv[8];
+        double   hv_fastv[8];
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
+        {
+            __m512i vb = _mm512_loadu_si512((const void*)resv);
+            __m512i vs = _mm512_set1_epi64(static_cast<int64_t>(loc_seed));
+            __m512i va = _mm512_xor_epi64(vb, vs);
+            __m512i vt = _mm512_srli_epi64(va, 33);
+            vb = _mm512_xor_epi64(va, vt);
+            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xff51afd7ed558ccdLL));
+            vt = _mm512_srli_epi64(va, 33);
+            vb = _mm512_xor_epi64(va, vt);
+            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xc4ceb9fe1a85ec53LL));
+            vt = _mm512_srli_epi64(va, 33);
+            vb = _mm512_xor_epi64(va, vt);
+#ifndef PMH_FAST_HASH
+            va = _mm512_xor_epi64(vb, vs);
+            vt = _mm512_srli_epi64(va, 33);
+            vb = _mm512_xor_epi64(va, vt);
+            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xff51afd7ed558ccdLL));
+            vt = _mm512_srli_epi64(va, 33);
+            vb = _mm512_xor_epi64(va, vt);
+            va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xc4ceb9fe1a85ec53LL));
+            vt = _mm512_srli_epi64(va, 33);
+            vb = _mm512_xor_epi64(va, vt);
+#endif
+            _mm512_storeu_si512(rng_innerv, vb);
+            __m512d vd = _mm512_cvtepu64_pd(_mm512_srli_epi64(vb, 11));
+            vd = _mm512_mul_pd(vd, _mm512_set1_pd(PMH_INV2_53));
+            _mm512_storeu_pd(hv_fastv,
+                _mm512_mul_pd(vd, _mm512_set1_pd(loc_c1_0)));
+        }
+#else
+        for (int j = 0; j < lanes; ++j) {
+            uint64_t h = mc::murmur3_fmix(resv[j], loc_seed);
+#ifndef PMH_FAST_HASH
+            h = mc::murmur3_fmix(h, loc_seed);
+#endif
+            rng_innerv[j] = h;
+            hv_fastv[j]   = static_cast<double>(h >> 11) * PMH_INV2_53 * loc_c1_0;
+        }
+#endif
+
+        // ── SIMD pre-filter with per-lane entropy weights ───────────────
+        double cur_max = tracker_.getMax();
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
+        {
+            const uint8_t lv_mask =
+                static_cast<uint8_t>(lane_valid[0])        | (static_cast<uint8_t>(lane_valid[1]) << 1) |
+                (static_cast<uint8_t>(lane_valid[2]) << 2) | (static_cast<uint8_t>(lane_valid[3]) << 3) |
+                (static_cast<uint8_t>(lane_valid[4]) << 4) | (static_cast<uint8_t>(lane_valid[5]) << 5) |
+                (static_cast<uint8_t>(lane_valid[6]) << 6) | (static_cast<uint8_t>(lane_valid[7]) << 7);
+
+            __m512d vhf  = _mm512_loadu_pd(hv_fastv);
+            __m512d vone = _mm512_set1_pd(1.0);
+            const uint8_t above1 = static_cast<uint8_t>(_mm512_cmp_pd_mask(vhf, vone, _CMP_GE_OQ));
+
+            __m512d vw      = _mm512_loadu_pd(batch_w);
+            __m512d vthresh = _mm512_mul_pd(_mm512_set1_pd(cur_max), vw);
+            const uint8_t blt  = static_cast<uint8_t>(_mm512_cmp_pd_mask(vhf, vthresh, _CMP_LT_OQ));
+            const uint8_t wpos = static_cast<uint8_t>(_mm512_cmp_pd_mask(
+                vw, _mm512_setzero_pd(), _CMP_GT_OQ));
+            uint8_t candidates = lv_mask & ((above1 | blt) & wpos);
+
+            while (candidates) {
+                const int j = __builtin_ctz(candidates);
+                candidates &= static_cast<uint8_t>(candidates - 1);
+                const double w = batch_w[j];
+                if (__builtin_expect(hv_fastv[j] < 1.0, 1) &&
+                    hv_fastv[j] >= cur_max * w)
+                    continue;
+                addHashFromRng(rng_innerv[j], w);
+                cur_max = tracker_.getMax();
+            }
+        }
+#else
+        for (int j = 0; j < lanes; ++j) {
+            if (!lane_valid[j]) continue;
+            const double w = batch_w[j];
+            if (!(w > 0.0)) continue;
+            const double hv_fast = hv_fastv[j];
+            if (__builtin_expect(hv_fast < 1.0, 1)) {
+                if (hv_fast >= cur_max * w) continue;
+            }
+            addHashFromRng(rng_innerv[j], w);
+            cur_max = tracker_.getMax();
+        }
+#endif
+    }
+
+    // ── Remainder loop (scalar) ─────────────────────────────────────────
+    double cur_max = tracker_.getMax();
+    for (uint64_t i = N_batch; i <= N_body; ++i) {
+        if (inv == 0) {
+            double H  = log2k - inv_k * (nlgn_tbl[bcnt[0]] + nlgn_tbl[bcnt[1]] +
+                                          nlgn_tbl[bcnt[2]] + nlgn_tbl[bcnt[3]]);
+            double wt = H * escale;
+            double w  = (wt < w_min) ? w_min : wt;
+            total_weight_ += w;
+
+            const uint64_t canonical = (fwd <= rev) ? fwd : rev;
+#ifdef PMH_FAST_HASH
+            uint64_t rng_inner = mc::murmur3_fmix(canonical, loc_seed);
+#else
+            uint64_t h         = mc::murmur3_fmix(canonical, loc_seed);
+            uint64_t rng_inner = mc::murmur3_fmix(h, loc_seed);
+#endif
+            const double hv_fast =
+                static_cast<double>(rng_inner >> 11) * PMH_INV2_53 * loc_c1_0;
+            if (__builtin_expect(hv_fast < 1.0, 1)) {
+                if (hv_fast < cur_max * w) {
+                    addHashFromRng(rng_inner, w);
+                    cur_max = tracker_.getMax();
+                }
+            } else {
+                addHashFromRng(rng_inner, w);
+                cur_max = tracker_.getMax();
+            }
+        }
+        if (i < N_body) {
+            uint8_t ef_out = PMH_ENC(seq[i]);
+            uint8_t ef_in  = PMH_ENC(seq[i + K]);
+            if (PMH_VALID(ef_out)) { bcnt[ef_out]--; }
+            else                   { inv--; }
+            if (PMH_VALID(ef_in))  { bcnt[ef_in]++; }
+            else                   { inv++; }
+            fwd = ((fwd << 2) | (PMH_VALID(ef_in) ? (ef_in & 3u) : 0u)) & kmer_mask;
+            uint8_t er_in = PMH_VALID(ef_in) ? (PMH_COMP(ef_in) & 3u) : 0u;
+            rev = (rev >> 2) | (static_cast<uint64_t>(er_in) << (2 * (K - 1)));
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // jaccard  (Opt #6: SIMD comparison — AVX-512 / AVX2 / scalar)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -965,6 +1185,23 @@ void ProbMinHash4::printSketch() const {
         std::fprintf(stdout, "%.4g ", regs[i]);
     if (m_ > 20) std::fprintf(stdout, "...");
     std::fprintf(stdout, "\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// inverted index key extraction
+// ═══════════════════════════════════════════════════════════════════════════
+
+void ProbMinHash4::getInvertedIndexKeys(std::vector<uint64_t>& keys) const {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double* regs = getRegisters();
+    keys.clear();
+    keys.reserve(m_);
+    for (uint32_t i = 0; i < m_; i++) {
+        if (regs[i] == inf) continue;
+        uint64_t raw;
+        std::memcpy(&raw, &regs[i], sizeof(double));
+        keys.push_back(raw ^ (uint64_t(i) * 0x9E3779B97F4A7C15ULL));
+    }
 }
 
 #undef PMH_ENC

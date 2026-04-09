@@ -480,6 +480,55 @@ double SetSketch::ani(const SetSketch& other, int kmer_size) const
   return std::pow(2.0 * j / (1.0 + j), 1.0 / static_cast<double>(kmer_size));
 }
 
+// ── inverted index: block key extraction ─────────────────────────────────────
+void SetSketch::getBlockKeys(std::vector<uint32_t>& keys, int blockSize) const {
+    const int m = getM();
+    const int nBlocks = m / blockSize;
+    keys.resize(nBlocks);
+    for (int b = 0; b < nBlocks; b++) {
+        keys[b] = blockHash(static_cast<uint32_t>(b),
+                            core_[b * 3],
+                            core_[b * 3 + 1],
+                            core_[b * 3 + 2]);
+    }
+}
+
+// ── inverted index: exact Jaccard from flat core arrays (SIMD) ──────────────
+double SetSketch::jaccardFromCores(
+    const uint8_t* __restrict__ c1,
+    const uint8_t* __restrict__ c2,
+    int m,
+    const double* __restrict__ baseInvPow,
+    double factor,
+    double card1, double card2)
+{
+    double sum = 0.0;
+    int i = 0;
+#if defined(__AVX512BW__) && defined(__AVX512F__)
+    __m512d vsum0 = _mm512_setzero_pd();
+    __m512d vsum1 = _mm512_setzero_pd();
+    for (; i + 16 <= m; i += 16) {
+        __m128i va   = _mm_loadu_si128((__m128i*)(c1 + i));
+        __m128i vb   = _mm_loadu_si128((__m128i*)(c2 + i));
+        __m128i vmax = _mm_max_epu8(va, vb);
+        __m256i vidx0 = _mm256_cvtepu8_epi32(vmax);
+        vsum0 = _mm512_add_pd(vsum0, _mm512_i32gather_pd(vidx0, baseInvPow, 8));
+        __m128i vmax_hi = _mm_srli_si128(vmax, 8);
+        __m256i vidx1 = _mm256_cvtepu8_epi32(vmax_hi);
+        vsum1 = _mm512_add_pd(vsum1, _mm512_i32gather_pd(vidx1, baseInvPow, 8));
+    }
+    sum = _mm512_reduce_add_pd(_mm512_add_pd(vsum0, vsum1));
+#endif
+    for (; i < m; i++) {
+        uint8_t r = (c1[i] > c2[i]) ? c1[i] : c2[i];
+        sum += baseInvPow[r];
+    }
+    if (sum <= 1e-300) return 0.0;
+    double us    = factor / sum;
+    double inter = card1 + card2 - us;
+    return (inter > 0.0) ? inter / us : 0.0;
+}
+
 #undef ENC
 #undef COMP
 #undef VALID

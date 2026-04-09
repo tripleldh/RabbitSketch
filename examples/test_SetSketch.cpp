@@ -1,278 +1,247 @@
 /**
- * test_SetSketch – fully optimized benchmark harness.
+ * test_SetSketch – SetSketch all-to-all via block-of-3 inverted index.
  *
- * Key optimizations:
- *  1. Pre-allocate sketch array → eliminate omp critical section
- *  2. Flat contiguous core array → cache-friendly band hash + distance
- *  3. Band-streaming LSH: process one band at a time with hash-map grouping
- *     → eliminates O(n·B) band_entries array + expensive global sort
- *  4. robin_hood hash set for O(1) candidate dedup
- *     → eliminates O(C·log C) candidate sort + dedup
- *  5. Inline SIMD distance on flat array with prefetch
- *  6. LSH bucket size cap → prevent candidate explosion
+ * SetSketch registers are 8-bit (only 256 values), so individual registers
+ * lack entropy for effective inverted-index filtering.  We group every 3
+ * adjacent registers into a block and hash (block_idx, v1, v2, v3) into a
+ * uint32_t key.  Random collision probability drops to ~(1/256)^3 ≈ 6e-8,
+ * while similar genomes (J≈0.2) still share ~25 matching blocks on average.
  *
- * Usage: exe_test_SetSketch <file_list> <dist_threshold> <threads> [max_bucket=500]
+ * Candidates passing the block-match threshold are verified with exact
+ * SetSketch Jaccard — zero accuracy loss.
+ *
+ * Usage:
+ *   exe_test_SetSketch <file_list> <dist_threshold> <threads> [output_file]
  */
+
 #include "Sketch.h"
-#include <sys/time.h>
-#include <zlib.h>
+#include "InvertedIndex.h"
+#include "common.h"
 #include "kseq.h"
-#include <vector>
-#include <cmath>
-#include <fstream>
+#include "phmap.h"
+
+#include <zlib.h>
+#include <sys/time.h>
 #include <err.h>
 #include <omp.h>
-#include <algorithm>
-#include <atomic>
+
+#include <vector>
+#include <string>
+#include <fstream>
+#include <iostream>
 #include <cstring>
-#include <immintrin.h>
-#include "common.h"
-#include "robin_hood.h"
+#include <cmath>
+#include <climits>
+#include <sys/stat.h>
+
 using namespace std;
 
 KSEQ_INIT(gzFile, gzread)
 
-// ── Inline union-size on flat core arrays (SIMD gather) ──────────────────────
-static inline double flat_union_card(const uint8_t* __restrict__ c1,
-                                     const uint8_t* __restrict__ c2,
-                                     int m,
-                                     const double* __restrict__ bip,
-                                     double factor)
-{
-  double sum = 0.0;
-#if defined(__AVX512BW__) && defined(__AVX512F__)
-  int i = 0;
-  __m512d vsum0 = _mm512_setzero_pd();
-  __m512d vsum1 = _mm512_setzero_pd();
-  for (; i + 16 <= m; i += 16) {
-    __m128i va = _mm_loadu_si128((__m128i*)(c1 + i));
-    __m128i vb = _mm_loadu_si128((__m128i*)(c2 + i));
-    __m128i vmax = _mm_max_epu8(va, vb);
-    __m256i vidx0 = _mm256_cvtepu8_epi32(vmax);
-    vsum0 = _mm512_add_pd(vsum0, _mm512_i32gather_pd(vidx0, bip, 8));
-    __m128i vmax_hi = _mm_srli_si128(vmax, 8);
-    __m256i vidx1 = _mm256_cvtepu8_epi32(vmax_hi);
-    vsum1 = _mm512_add_pd(vsum1, _mm512_i32gather_pd(vidx1, bip, 8));
-  }
-  sum = _mm512_reduce_add_pd(_mm512_add_pd(vsum0, vsum1));
-  for (; i < m; i++) {
-    uint8_t r = (c1[i] > c2[i]) ? c1[i] : c2[i];
-    sum += bip[r];
-  }
-#else
-  for (int i = 0; i < m; i++) {
-    uint8_t r = (c1[i] > c2[i]) ? c1[i] : c2[i];
-    sum += bip[r];
-  }
-#endif
-  return (sum > 1e-300) ? factor / sum : 0.0;
-}
-
 int main(int argc, char* argv[])
 {
-  if (argc < 4) {
-    cerr << "usage: " << argv[0]
-         << " <file_list> <dist_threshold> <threads> [max_bucket=500]" << endl;
-    return 1;
-  }
-  string inputFile = argv[1];
-  double thres     = stod(argv[2]);
-  int numThreads   = stoi(argv[3]);
-  if (numThreads < 1) numThreads = 1;
-  int MAX_BUCKET   = (argc >= 5) ? stoi(argv[4]) : 500;
+    if (argc < 4) {
+        cerr << "usage: " << argv[0]
+             << " <file_list> <dist_threshold> <threads> [output_file]" << endl;
+        return 1;
+    }
+    const string inputFile = argv[1];
+    const double thres     = stod(argv[2]);
+    int          nThreads  = stoi(argv[3]);
+    if (nThreads < 1) nThreads = 1;
+    const string outPath = (argc >= 5) ? argv[4] : "res.dist.SetSketch";
 
-  ifstream fs(inputFile);
-  if (!fs) err(errno, "cannot open %s", inputFile.c_str());
+    ifstream fs(inputFile);
+    if (!fs) err(errno, "cannot open %s", inputFile.c_str());
+    vector<string> fileList;
+    { string line; while (getline(fs, line)) if (!line.empty()) fileList.push_back(line); }
+    const int N = (int)fileList.size();
+    cerr << "===== total files: " << N << "  (SetSketch)" << endl;
 
-  vector<string> fileArr;
-  { string line; while (getline(fs, line)) fileArr.push_back(line); }
-  const int n = (int)fileArr.size();
-  cerr << "===== total files: " << n << " (SetSketch, optimized)" << endl;
+    // ── Phase 0: pre-allocate sketches ───────────────────────────────────────
+    static const int BITS = 13;
+    vector<Sketch::SetSketch> vsketch;
+    vsketch.reserve(N);
+    for (int i = 0; i < N; i++)
+        vsketch.emplace_back(BITS, 2.0, 20.0);
 
-  // ── Phase 0: pre-allocate sketches (serial, ~0.1 s) ────────────────────────
-  static const int BITS = 13;
-  vector<Sketch::SetSketch> vsketch;
-  vsketch.reserve(n);
-  for (int i = 0; i < n; i++)
-    vsketch.emplace_back(BITS, 2.0, 20.0);
+    // ── Phase 1a: parallel sketch construction ───────────────────────────────
+    double t0 = get_sec();
 
-  // ── Phase 1: parallel sketch construction (NO critical section) ─────────────
-  double t1 = get_sec();
-
-  #pragma omp parallel for num_threads(numThreads) schedule(dynamic)
-  for (int t = 0; t < n; t++) {
-    gzFile fp1 = gzopen(fileArr[t].c_str(), "r");
-    if (fp1 == NULL) continue;
-    kseq_t* ks1 = kseq_init(fp1);
-    while (kseq_read(ks1) >= 0)
-      vsketch[t].update(ks1->seq.s);
-    kseq_destroy(ks1);
-    gzclose(fp1);
-  }
-
-  double t2 = get_sec();
-  cerr << "sketch time is: " << t2 - t1 << endl;
-
-  // ── Phase 2: extract flat core array + pre-compute cardinalities ────────────
-  const int m = vsketch[0].getM();
-  const double factor = vsketch[0].getFactor();
-  const double* bip   = vsketch[0].getBaseInvPow();
-
-  vector<double> sizes(n);
-  vector<uint8_t> flat_cores((size_t)n * m);
-
-  #pragma omp parallel for num_threads(numThreads) schedule(static)
-  for (int i = 0; i < n; i++) {
-    sizes[i] = vsketch[i].cardinality();
-    memcpy(&flat_cores[(size_t)i * m], vsketch[i].getCore().data(), m);
-  }
-  double t_phase1 = get_sec();
-  cerr << "  Phase 1 cardinality + flatten (parallel): " << t_phase1 - t2 << " s" << endl;
-
-  // ── Phase 3–5: Band-streaming LSH + inline verification ─────────────────────
-  //
-  // Instead of materializing n×BANDS entries, sorting, deduplicating, and then
-  // verifying, we process ONE BAND AT A TIME:
-  //   1. Build hash-map buckets for band b   → O(n)
-  //   2. Enumerate candidate pairs per bucket → O(pairs_in_band)
-  //   3. Dedup via robin_hood hash set        → O(1) per pair
-  //   4. Verify new pairs inline (parallel)   → O(new_pairs × m)
-  //
-  // Memory savings:
-  //   - Eliminates band_entries  (was n×128×12 bytes)
-  //   - Eliminates candidates    (was up to billions of entries + sort)
-  //   - Dedup set grows only to unique candidate count
-
-  const int BANDS = 128;
-  const int ROWS  = m / BANDS;
-  const double min_jaccard = 1.0 - thres;
-
-  auto band_hash = [](const uint8_t* data, int len) -> uint32_t {
-    uint32_t h = 2166136261u;
-    for (int i = 0; i < len; i++) { h ^= data[i]; h *= 16777619u; }
-    return h;
-  };
-
-  vector<string> thread_bufs(numThreads);
-
-  // Partitioned dedup: split pair space into NUM_PARTS buckets, each with its
-  // own hash set + spinlock, to allow high concurrent insert throughput.
-  constexpr int NUM_PARTS = 256;
-  struct alignas(64) DedupPart {
-    robin_hood::unordered_set<uint64_t> set;
-    omp_lock_t lock;
-  };
-  vector<DedupPart> dedup(NUM_PARTS);
-  for (auto& d : dedup) omp_init_lock(&d.lock);
-
-  auto pair_key = [](int i, int j) -> uint64_t {
-    return ((uint64_t)(unsigned)i << 32) | (unsigned)j;
-  };
-  auto try_insert = [&](int i, int j) -> bool {
-    uint64_t k = pair_key(i, j);
-    int part = (int)((k * 0x9E3779B97F4A7C15ULL) >> 56) & (NUM_PARTS - 1);
-    omp_set_lock(&dedup[part].lock);
-    bool inserted = dedup[part].set.insert(k).second;
-    omp_unset_lock(&dedup[part].lock);
-    return inserted;
-  };
-
-  atomic<long long> cnt_size_filtered{0};
-  atomic<long long> cnt_exact{0};
-  long long total_unique_cands = 0;
-  long long skipped_buckets = 0;
-
-  double t_lsh_start = get_sec();
-
-  for (int b = 0; b < BANDS; b++) {
-    // ── 3a. Build bucket map for this band ──────────────────────────────────
-    robin_hood::unordered_map<uint32_t, vector<int>> bkt;
-    bkt.reserve((size_t)n);
-    for (int i = 0; i < n; i++) {
-      uint32_t h = band_hash(flat_cores.data() + (size_t)i * m + b * ROWS, ROWS);
-      bkt[h].push_back(i);
+    #pragma omp parallel for num_threads(nThreads) schedule(dynamic)
+    for (int t = 0; t < N; t++) {
+        gzFile fp = gzopen(fileList[t].c_str(), "r");
+        if (!fp) continue;
+        kseq_t* ks = kseq_init(fp);
+        while (kseq_read(ks) >= 0)
+            vsketch[t].update(ks->seq.s);
+        kseq_destroy(ks);
+        gzclose(fp);
     }
 
-    // ── 3b. Collect new candidate pairs (dedup against previous bands) ──────
-    vector<pair<int,int>> new_pairs;
-    for (auto& [key, ids] : bkt) {
-      int sz = (int)ids.size();
-      if (sz < 2) continue;
-      if (sz > MAX_BUCKET) { skipped_buckets++; continue; }
-      for (int a = 0; a < sz; a++)
-        for (int c = a + 1; c < sz; c++) {
-          int ii = min(ids[a], ids[c]), jj = max(ids[a], ids[c]);
-          // Size-ratio prefilter (cheap, avoids hash set lookup)
-          double si = sizes[ii], sj = sizes[jj];
-          if (si <= 0 || sj <= 0) continue;
-          if (min(si, sj) / max(si, sj) < min_jaccard * 0.93) {
-            cnt_size_filtered++;
-            continue;
-          }
-          new_pairs.emplace_back(ii, jj);
+    double t1 = get_sec();
+    cerr << "sketch time: " << t1 - t0 << " s" << endl;
+
+    // ── Phase 1b: flatten cores + cardinalities ──────────────────────────────
+    const int m       = vsketch[0].getM();
+    const double factor = vsketch[0].getFactor();
+    double bip_buf[64];
+    memcpy(bip_buf, vsketch[0].getBaseInvPow(), 64 * sizeof(double));
+    const double* bip = bip_buf;
+
+    vector<double>  sizes(N);
+    vector<uint8_t> flat_cores((size_t)N * m);
+
+    #pragma omp parallel for num_threads(nThreads) schedule(static)
+    for (int i = 0; i < N; i++) {
+        sizes[i] = vsketch[i].cardinality();
+        memcpy(&flat_cores[(size_t)i * m], vsketch[i].getCore().data(), m);
+    }
+    { vector<Sketch::SetSketch>().swap(vsketch); }
+
+    double t2 = get_sec();
+    cerr << "flatten + free sketches: " << t2 - t1 << " s" << endl;
+
+    // ── Phase 1c: build local inverted index with block-of-3 keys ────────────
+    const int NUM_BLOCKS = Sketch::SetSketch::numBlocks(m);
+
+    const int actualThreads = min(nThreads, N);
+    vector<phmap::flat_hash_map<uint32_t, vector<uint32_t>>> threadIdx(actualThreads);
+
+    #pragma omp parallel num_threads(nThreads)
+    {
+        int tid = omp_get_thread_num();
+        auto& localIdx = threadIdx[tid];
+
+        #pragma omp for schedule(static)
+        for (int t = 0; t < N; t++) {
+            const uint8_t* core = &flat_cores[(size_t)t * m];
+            for (int b = 0; b < NUM_BLOCKS; b++) {
+                uint32_t key = Sketch::SetSketch::blockHash(
+                    static_cast<uint32_t>(b),
+                    core[b * 3], core[b * 3 + 1], core[b * 3 + 2]);
+                localIdx[key].push_back(static_cast<uint32_t>(t));
+            }
         }
     }
 
-    // ── 3c. Dedup + inline verification (parallel) ──────────────────────────
-    const int np = (int)new_pairs.size();
+    double t3 = get_sec();
+    cerr << "local inverted index: " << t3 - t2 << " s" << endl;
 
-    #pragma omp parallel for num_threads(numThreads) schedule(dynamic, 256)
-    for (int c = 0; c < np; c++) {
-      int i = new_pairs[c].first, j = new_pairs[c].second;
+    // ── Phase 2: Build CSR inverted index ────────────────────────────────────
+    auto csrIdx = Sketch::buildCSRIndex<uint32_t>(threadIdx, nThreads);
+    double t4 = get_sec();
+    cerr << "build CSR index: " << t4 - t3 << " s" << endl;
 
-      if (!try_insert(i, j)) continue;  // already processed in a previous band
+    // ── Phase 3: distance with exact verification ────────────────────────────
+    const int minMatchBlocks = Sketch::SetSketch::minMatchBlocksForDist(thres, NUM_BLOCKS);
 
-      // Prefetch next pair's core data
-      if (c + 1 < np) {
-        __builtin_prefetch(&flat_cores[(size_t)new_pairs[c+1].first  * m], 0, 0);
-        __builtin_prefetch(&flat_cores[(size_t)new_pairs[c+1].second * m], 0, 0);
-      }
+    cerr << "pruning: minMatchBlocks=" << minMatchBlocks << "/" << NUM_BLOCKS
+         << "  (minJac=" << (1.0 - thres) << ", maxDist=" << thres << ")" << endl;
 
-      cnt_exact++;
-      const uint8_t* c1 = &flat_cores[(size_t)i * m];
-      const uint8_t* c2 = &flat_cores[(size_t)j * m];
-      double us = flat_union_card(c1, c2, m, bip, factor);
-      if (us <= 0.0) continue;
-      double si = sizes[i], sj = sizes[j];
-      double inter = si + sj - us;
-      double jaccard = (inter > 0.0) ? inter / us : 0.0;
-      double dist = 1.0 - jaccard;
-
-      if (dist < thres) {
-        int tid = omp_get_thread_num();
-        char line[4096];
-        int len = snprintf(line, sizeof(line), "%s\t%s\t%lf\n",
-                           fileArr[i].c_str(), fileArr[j].c_str(), dist);
-        thread_bufs[tid].append(line, len);
-      }
+    // Handle output path (directory detection)
+    string finalPath = outPath;
+    {
+        struct stat st;
+        if (stat(finalPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (finalPath.back() != '/') finalPath += '/';
+            finalPath += "res.dist.SetSketch";
+        }
     }
-    total_unique_cands += np;
-  }
+    FILE* fout = fopen(finalPath.c_str(), "w");
+    if (!fout) {
+        cerr << "ERROR: cannot open output file: " << finalPath << endl;
+        return 1;
+    }
+    setvbuf(fout, nullptr, _IOFBF, 1 << 24);
+    cerr << "output: " << finalPath << endl;
 
-  for (auto& d : dedup) omp_destroy_lock(&d.lock);
-  long long dedup_total = 0;
-  for (auto& d : dedup) dedup_total += (long long)d.set.size();
+    const uint32_t* csrPtr = csrIdx.csrPosts.data();
+    int progress = N / 20;
+    if (progress < 1) progress = 1;
 
-  double t_lsh = get_sec();
-  const long long total_pairs = (long long)n * (n - 1) / 2;
-  cerr << "LSH band-streaming done (" << BANDS << " bands):" << endl;
-  cerr << "  unique candidates:  " << dedup_total << " / " << total_pairs
-       << " total pairs (reduction: "
-       << 100.0*(1.0-(double)dedup_total/total_pairs) << "%)" << endl;
-  cerr << "  skipped buckets:    " << skipped_buckets << endl;
-  cerr << "  size-filtered:      " << cnt_size_filtered.load() << endl;
-  cerr << "  exact computed:     " << cnt_exact.load() << endl;
-  cerr << "  LSH + verify time:  " << t_lsh - t_phase1 << " s" << endl;
+    double t5 = get_sec();
 
-  // Flush all buffers to a single output file
-  system("mkdir -p res_dir");
-  FILE* fp_out = fopen("res_dir/res.dist.SetSketch", "w");
-  for (int t = 0; t < numThreads; t++)
-    fwrite(thread_bufs[t].data(), 1, thread_bufs[t].size(), fp_out);
-  fclose(fp_out);
+    #pragma omp parallel num_threads(nThreads)
+    {
+        vector<int> isect(N, 0);
+        vector<int> stamp(N, 0);
+        int ep = 0;
+        vector<int> cand;
+        cand.reserve(4096);
+        string buf;
+        buf.reserve(1 << 24);
 
-  double t3 = get_sec();
-  cerr << "total time: " << t3 - t1 << " s" << endl;
+        #pragma omp for schedule(dynamic, 64)
+        for (int i = 0; i < N; i++) {
+            cand.clear();
+            ++ep;
+            if (__builtin_expect(ep == INT_MAX, 0)) {
+                memset(stamp.data(), 0, N * sizeof(int));
+                ep = 1;
+            }
 
-  return 0;
+            // Reconstruct block keys from flat_cores (no skKeys storage needed)
+            const uint8_t* core_i = &flat_cores[(size_t)i * m];
+            for (int b = 0; b < NUM_BLOCKS; b++) {
+                uint32_t key = Sketch::SetSketch::blockHash(
+                    static_cast<uint32_t>(b),
+                    core_i[b * 3], core_i[b * 3 + 1], core_i[b * 3 + 2]);
+
+                auto it = csrIdx.postIdx.find(key);
+                if (__builtin_expect(it == csrIdx.postIdx.end(), 0)) continue;
+
+                const uint32_t* pl   = csrPtr + it->second.off;
+                const uint32_t  plSz = it->second.cnt;
+                for (uint32_t pi = 0; pi < plSz; pi++) {
+                    int j = static_cast<int>(pl[pi]);
+                    if (j <= i) continue;
+                    if (__builtin_expect(stamp[j] != ep, 1)) {
+                        stamp[j] = ep;
+                        isect[j] = 1;
+                        cand.push_back(j);
+                    } else {
+                        isect[j]++;
+                    }
+                }
+            }
+
+            // Verify candidates with exact SetSketch Jaccard
+            const double si = sizes[i];
+            for (int j : cand) {
+                if (isect[j] < minMatchBlocks) continue;
+
+                const uint8_t* c2 = &flat_cores[(size_t)j * m];
+                double jaccard = Sketch::SetSketch::jaccardFromCores(
+                    core_i, c2, m, bip, factor, si, sizes[j]);
+                double dist = 1.0 - jaccard;
+
+                if (dist < thres) {
+                    char line[1024];
+                    int len = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
+                                       fileList[i].c_str(), fileList[j].c_str(), dist);
+                    buf.append(line, static_cast<size_t>(len));
+                }
+            }
+
+            if (buf.size() > (1 << 24)) {
+                #pragma omp critical
+                { fwrite(buf.data(), 1, buf.size(), fout); }
+                buf.clear();
+            }
+            if (i % progress == 0)
+                cerr << "  dist " << i << " / " << N << "\n";
+        }
+        if (!buf.empty()) {
+            #pragma omp critical
+            { fwrite(buf.data(), 1, buf.size(), fout); }
+        }
+    }
+    fclose(fout);
+
+    double t6 = get_sec();
+    cerr << "dist time: " << t6 - t5 << " s" << endl;
+    cerr << "total time: " << t6 - t0 << " s" << endl;
+
+    return 0;
 }

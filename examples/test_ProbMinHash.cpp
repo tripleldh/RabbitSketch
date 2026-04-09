@@ -1,324 +1,131 @@
 /**
- * test_ProbMinHash – benchmark harness for weighted ProbMinHash4.
+ * test_ProbMinHash – ProbMinHash4 (weighted) all-to-all via inverted index.
  *
- * 与 eval_pmh_weighted_accuracy 一致：每条 read 内 k-mer 起点 i（0 .. L-k）
- * 使用确定性权重 w[i]∈[0.25,1]，再调用 updateWeighted(seq, L, w.data())。
+ * Each register stores a double value that acts as a unique fingerprint.
+ * Key = raw-bits(double) XOR hash(register_index).  Two genomes share a key
+ * iff the same k-mer produced the minimum for the same register in both —
+ * probability of cross-register collision is ~2^-64.
  *
- * Structure mirrors test_MinHash.cpp (no serial pre-allocation):
- *   - File list read (serial, fast).
- *   - Parallel loop: each thread opens one file, constructs one ProbMinHash4,
- *     reads + weighted updates, then critical push_back.
- *   - Flatten registers to flat array, LSH banding, candidate verification.
+ * Jaccard = matching_registers / M.   Distance = 1 - Jaccard.
  *
  * Usage:
- *   exe_test_ProbMinHash <file_list> <dist_threshold> <threads> [max_bucket=500]
+ *   exe_test_ProbMinHash <file_list> <dist_threshold> <threads> [output_file]
  */
 
 #include "probmh.h"
+#include "InvertedIndex.h"
 #include "common.h"
 #include "kseq.h"
+#include "phmap.h"
 
 #include <zlib.h>
 #include <sys/time.h>
 #include <err.h>
 #include <omp.h>
-#include <immintrin.h>
 
 #include <vector>
 #include <string>
 #include <fstream>
-#include <algorithm>
-#include <atomic>
-#include <cstdint>
+#include <iostream>
 #include <cstring>
 #include <limits>
-
-#if defined(__GNUC__) && defined(_OPENMP)
-#  include <parallel/algorithm>
-#endif
 
 using namespace std;
 
 KSEQ_INIT(gzFile, gzread)
 
-// ── Inline Jaccard on flat double array ──────────────────────────────────────
-// Counts registers where a[k] == b[k] and a[k] != inf.
-// Identical to ProbMinHash4::jaccard() but operates on raw pointers so the
-// compiler sees two non-aliasing arrays and can auto-vectorise / use SIMD.
-static inline double flat_jaccard(const double* __restrict__ a,
-                                  const double* __restrict__ b,
-                                  int m)
-{
-    const double inf = numeric_limits<double>::infinity();
-    int count = 0;
-    int k = 0;
-
-#if defined(__AVX512F__)
-    {
-        __m512d vinf = _mm512_set1_pd(inf);
-        for (; k + 8 <= m; k += 8) {
-            __m512d va = _mm512_loadu_pd(a + k);
-            __m512d vb = _mm512_loadu_pd(b + k);
-            __mmask8 eq     = _mm512_cmp_pd_mask(va, vb, _CMP_EQ_OQ);
-            __mmask8 notinf = _mm512_cmp_pd_mask(va, vinf, _CMP_NEQ_UQ);
-            count += __builtin_popcount(eq & notinf);
-        }
-    }
-#elif defined(__AVX2__)
-    {
-        __m256d vinf = _mm256_set1_pd(inf);
-        for (; k + 4 <= m; k += 4) {
-            __m256d va  = _mm256_loadu_pd(a + k);
-            __m256d vb  = _mm256_loadu_pd(b + k);
-            __m256d ceq = _mm256_cmp_pd(va, vb, _CMP_EQ_OQ);
-            __m256d cni = _mm256_cmp_pd(va, vinf, _CMP_NEQ_UQ);
-            __m256d res = _mm256_and_pd(ceq, cni);
-            count += __builtin_popcount(_mm256_movemask_pd(res));
-        }
-    }
-#endif
-    for (; k < m; ++k)
-        count += (a[k] == b[k] && a[k] != inf) ? 1 : 0;
-
-    return (double)count / (double)m;
-}
-
-// Weights are now computed by fill_kmer_entropy_weights() from common.h:
-// w[i] = Shannon entropy of k-mer at position i, normalized to [0.1, 1.0].
-// Low-complexity k-mers (poly-A runs, repetitive regions) get low weight;
-// high-complexity k-mers get high weight.
-
 int main(int argc, char* argv[])
 {
     if (argc < 4) {
         cerr << "usage: " << argv[0]
-             << " <file_list> <dist_threshold> <threads> [max_bucket=500]"
-             << endl;
+             << " <file_list> <dist_threshold> <threads> [output_file]" << endl;
         return 1;
     }
     const string inputFile  = argv[1];
-    const double thres      = stod(argv[2]);
-    int          numThreads = stoi(argv[3]);
-    if (numThreads < 1) numThreads = 1;
-    const int MAX_BUCKET = (argc >= 5) ? stoi(argv[4]) : 500;
+    const double maxDist    = stod(argv[2]);
+    int          nThreads   = stoi(argv[3]);
+    if (nThreads < 1) nThreads = 1;
+    const string outPath = (argc >= 5) ? argv[4] : "res.dist.ProbMinHash";
 
     ifstream fs(inputFile);
     if (!fs) err(errno, "cannot open %s", inputFile.c_str());
-
-    vector<string> fileArr;
-    { string line; while (getline(fs, line)) if (!line.empty()) fileArr.push_back(line); }
-    const int n = (int)fileArr.size();
-    cerr << "===== total files: " << n << "  (ProbMinHash4 weighted, k-mer start weights)" << endl;
+    vector<string> fileList;
+    { string line; while (getline(fs, line)) if (!line.empty()) fileList.push_back(line); }
+    const int N = (int)fileList.size();
+    cerr << "===== total files: " << N << "  (ProbMinHash4)" << endl;
 
     static const uint32_t M     = 1024;
     static const int      KSIZE = 21;
     static const uint64_t SEED  = 42;
-    const int m = (int)M;
+    const int mSize = static_cast<int>(M);
 
-    // Like test_MinHash: no serial pre-allocation. Each thread builds one sketch
-    // (open file → construct ProbMinHash4 → read+update → critical push_back).
-    vector<Sketch::ProbMinHash4> vsketches;
-    vector<string>               paths;   // paths[i] = file path for vsketches[i]
-    vsketches.reserve(n);
-    paths.reserve(n);
+    // ── Phase 1: Sketch + local inverted index ───────────────────────────────
+    vector<int> sketchSizes(N, mSize);
+    vector<vector<uint64_t>> skKeys(N);
 
-    double t1 = get_sec();
+    const int actualThreads = min(nThreads, N);
+    vector<phmap::flat_hash_map<uint64_t, vector<uint32_t>>> threadIdx(actualThreads);
 
-    #pragma omp parallel for num_threads(numThreads) schedule(dynamic)
-    for (int t = 0; t < n; t++) {
-        gzFile fp1 = gzopen(fileArr[t].c_str(), "r");
-        if (fp1 == NULL) continue;
-        kseq_t* ks1 = kseq_init(fp1);
+    double t0 = get_sec();
 
-        Sketch::ProbMinHash4 sk(M, KSIZE, SEED);
-        vector<double>        w;
-        while (kseq_read(ks1) >= 0) {
-            uint64_t L = static_cast<uint64_t>(ks1->seq.l);
-            if (L >= static_cast<uint64_t>(KSIZE)) {
-                // Shannon entropy weights: same k-mer → same weight across sequences.
-                // Low-complexity k-mers (poly-A, repeats) get low weight (≥0.1).
-                fill_kmer_entropy_weights(w, ks1->seq.s, L, KSIZE);
-                sk.updateWeighted(ks1->seq.s, L, w.data());
-            }
-        }
-
-        #pragma omp critical
-        {
-            vsketches.push_back(std::move(sk));
-            paths.push_back(fileArr[t]);
-        }
-        kseq_destroy(ks1);
-        gzclose(fp1);
-    }
-
-    double t2 = get_sec();
-    cerr << "sketch time: " << t2 - t1 << " s" << endl;
-
-    const int n_actual = (int)vsketches.size();
-    if (n_actual == 0) { cerr << "no sketches built" << endl; return 1; }
-
-    // Flatten: pack registers row-major for cache-friendly distance + LSH.
-    vector<double> flat_regs((size_t)n_actual * m);
-
-    #pragma omp parallel for num_threads(numThreads) schedule(static)
-    for (int i = 0; i < n_actual; i++) {
-        const double* src = vsketches[i].getRegisters();
-        memcpy(&flat_regs[(size_t)i * m], src, m * sizeof(double));
-    }
-    { vector<Sketch::ProbMinHash4>().swap(vsketches); }
-
-    double t_flat = get_sec();
-    cerr << "flatten + free sketches: " << t_flat - t2 << " s" << endl;
-
-    // ── Phase 3: LSH banding ─────────────────────────────────────────────────
-    // Band hash: FNV-1a over the raw bytes of one band of doubles.
-    const int BANDS = 128;
-    const int ROWS  = m / BANDS;   // 8 registers per band with M=1024
-
-    auto band_hash = [&](const double* data, int rows) -> uint32_t {
-        uint32_t h = 2166136261u;
-        const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
-        for (int i = 0; i < rows * (int)sizeof(double); i++) {
-            h ^= p[i];
-            h *= 16777619u;
-        }
-        return h;
-    };
-
-    vector<pair<uint64_t,int>> band_entries((size_t)n_actual * BANDS);
-    #pragma omp parallel for num_threads(numThreads) schedule(static)
-    for (int i = 0; i < n_actual; i++) {
-        const double* regs = &flat_regs[(size_t)i * m];
-        for (int b = 0; b < BANDS; b++) {
-            uint32_t h = band_hash(regs + b * ROWS, ROWS);
-            band_entries[(size_t)i * BANDS + b] =
-                { ((uint64_t)(uint32_t)b << 32) | (uint32_t)h, i };
-        }
-    }
-    double t_build = get_sec();
-    cerr << "  build band_entries (parallel): " << t_build - t_flat << " s" << endl;
-
-#if defined(__GNUC__) && defined(_OPENMP)
-    __gnu_parallel::sort(band_entries.begin(), band_entries.end());
-#else
-    sort(band_entries.begin(), band_entries.end());
-#endif
-    double t_sort = get_sec();
-    cerr << "  sort band_entries [PARALLEL]: " << t_sort - t_build << " s" << endl;
-
-    // Group boundaries
-    vector<size_t> group_start;
-    group_start.reserve(band_entries.size() / 4);
-    group_start.push_back(0);
-    for (size_t i = 1; i < band_entries.size(); i++)
-        if (band_entries[i].first != band_entries[i-1].first)
-            group_start.push_back(i);
-    group_start.push_back(band_entries.size());
-    const int n_groups = (int)group_start.size() - 1;
-
-    // Generate candidate pairs with bucket cap
-    long long skipped_buckets = 0;
-    vector<vector<pair<int,int>>> thread_cands((size_t)numThreads);
-
-    #pragma omp parallel num_threads(numThreads)
+    #pragma omp parallel num_threads(nThreads)
     {
         int tid = omp_get_thread_num();
-        auto& local = thread_cands[tid];
-        local.clear();
-        #pragma omp for schedule(dynamic) reduction(+:skipped_buckets)
-        for (int g = 0; g < n_groups; g++) {
-            size_t s = group_start[g], e = group_start[g+1];
-            int bsz = (int)(e - s);
-            if (bsz > MAX_BUCKET) { skipped_buckets++; continue; }
-            for (size_t a = s; a < e; a++)
-                for (size_t b = a+1; b < e; b++) {
-                    int ia = band_entries[a].second, ib = band_entries[b].second;
-                    local.emplace_back(min(ia, ib), max(ia, ib));
-                }
-        }
-    }
-    band_entries.clear();
-    band_entries.shrink_to_fit();
+        auto& localIdx = threadIdx[tid];
 
-    // Merge per-thread candidates
-    vector<size_t> prefix((size_t)numThreads + 1);
-    prefix[0] = 0;
-    for (int t = 0; t < numThreads; t++)
-        prefix[t+1] = prefix[t] + thread_cands[t].size();
-    size_t total_cands = prefix[numThreads];
-    vector<pair<int,int>> candidates(total_cands);
-    #pragma omp parallel for num_threads(numThreads)
-    for (int t = 0; t < numThreads; t++)
-        copy(thread_cands[t].begin(), thread_cands[t].end(),
-             candidates.begin() + prefix[t]);
-    thread_cands.clear();
-    thread_cands.shrink_to_fit();
+        #pragma omp for schedule(dynamic)
+        for (int t = 0; t < N; t++) {
+            gzFile fp = gzopen(fileList[t].c_str(), "r");
+            if (!fp) continue;
+            kseq_t* ks = kseq_init(fp);
 
-    double t_scan = get_sec();
-    cerr << "  scan->candidates (parallel): " << t_scan - t_sort << " s"
-         << "  (skipped " << skipped_buckets << " large buckets)" << endl;
+            Sketch::ProbMinHash4 sk(M, KSIZE, SEED);
+            while (kseq_read(ks) >= 0) {
+                uint64_t L = static_cast<uint64_t>(ks->seq.l);
+                if (L >= static_cast<uint64_t>(KSIZE))
+                    sk.updateEntropy(ks->seq.s, L);
+            }
+            kseq_destroy(ks);
+            gzclose(fp);
 
-    // Dedup
-#if defined(__GNUC__) && defined(_OPENMP)
-    __gnu_parallel::sort(candidates.begin(), candidates.end());
-#else
-    sort(candidates.begin(), candidates.end());
-#endif
-    candidates.erase(unique(candidates.begin(), candidates.end()), candidates.end());
-    double t_lsh = get_sec();
-    cerr << "  sort+dedup candidates: " << t_lsh - t_scan << " s" << endl;
-
-    const long long total_pairs = (long long)n_actual * (n_actual - 1) / 2;
-    cerr << "LSH candidates: " << candidates.size()
-         << " / " << total_pairs << " total pairs"
-         << "  (reduction: "
-         << 100.0 * (1.0 - (double)candidates.size() / (double)total_pairs)
-         << "%)" << endl;
-    cerr << "LSH index time (total): " << t_lsh - t2 << " s" << endl;
-
-    // ── Phase 4: verify candidates with inline SIMD distance ─────────────────
-    // Operates on flat_regs directly – no object indirection, no indirect ptr.
-    // Prefetch the next pair's register arrays to hide memory latency.
-    vector<string> thread_bufs(numThreads);
-    const int    ncand = (int)candidates.size();
-    atomic<long long> cnt_exact{0};
-
-    #pragma omp parallel for num_threads(numThreads) schedule(dynamic, 4096)
-    for (int c = 0; c < ncand; c++) {
-        int i = candidates[c].first, j = candidates[c].second;
-        int tid = omp_get_thread_num();
-
-        // Prefetch next pair's data
-        if (c + 1 < ncand) {
-            __builtin_prefetch(&flat_regs[(size_t)candidates[c+1].first  * m], 0, 1);
-            __builtin_prefetch(&flat_regs[(size_t)candidates[c+1].second * m], 0, 1);
-        }
-
-        cnt_exact++;
-        const double* ra = &flat_regs[(size_t)i * m];
-        const double* rb = &flat_regs[(size_t)j * m];
-        double jaccard = flat_jaccard(ra, rb, m);
-        double dist    = 1.0 - jaccard;
-
-        if (dist < thres) {
-            char line[4096];
-            int len = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
-                               paths[i].c_str(), paths[j].c_str(), dist);
-            thread_bufs[tid].append(line, len);
+            sk.getInvertedIndexKeys(skKeys[t]);
+            for (auto key : skKeys[t])
+                localIdx[key].push_back(static_cast<uint32_t>(t));
         }
     }
 
-    system("mkdir -p res_dir");
-    FILE* fp_out = fopen("res_dir/res.dist.ProbMinHash", "w");
-    for (int t = 0; t < numThreads; t++)
-        fwrite(thread_bufs[t].data(), 1, thread_bufs[t].size(), fp_out);
-    fclose(fp_out);
+    double t1 = get_sec();
+    cerr << "sketch + local index: " << t1 - t0 << " s" << endl;
+
+    // ── Phase 2: Build CSR inverted index ────────────────────────────────────
+    auto csrIdx = Sketch::buildCSRIndex<uint64_t>(threadIdx, nThreads);
+    double t2 = get_sec();
+    cerr << "build CSR index: " << t2 - t1 << " s" << endl;
+
+    // ── Phase 3: Distance via inverted index ─────────────────────────────────
+    // ProbMinHash: Jaccard = common / M, dist = 1 - Jaccard
+    // kmerSize=0 tells computeDistances to use direct distance (1-J)
+    const int minCommon = Sketch::ProbMinHash4::minCommonForDist(maxDist, M);
+    cerr << "pruning: minCommon=" << minCommon << "/" << mSize
+         << "  (minJac=" << (1.0 - maxDist) << ", maxDist=" << maxDist << ")" << endl;
+
+    auto jaccardFn = [mSize](int common, int /*s0*/, int /*s1*/) -> double {
+        return Sketch::ProbMinHash4::jaccardFromCommon(common, static_cast<uint32_t>(mSize));
+    };
+
+    auto minCommonFn = [minCommon](int /*s0*/) -> int {
+        return minCommon;
+    };
 
     double t3 = get_sec();
-    cerr << "dist time: " << t3 - t_lsh << " s" << endl;
-    cerr << "  candidates:   " << (long long)candidates.size() << endl;
-    cerr << "  exact computed: " << cnt_exact.load() << endl;
-    cerr << "total time: " << t3 - t1 << " s" << endl;
+    Sketch::computeDistances<uint64_t>(
+        csrIdx, skKeys, sketchSizes, fileList,
+        N, 0 /*kmerSize=0 → direct dist*/, maxDist,
+        jaccardFn, minCommonFn, outPath, nThreads);
+    double t4 = get_sec();
+
+    cerr << "dist time: " << t4 - t3 << " s" << endl;
+    cerr << "total time: " << t4 - t0 << " s" << endl;
 
     return 0;
 }

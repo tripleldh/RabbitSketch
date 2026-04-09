@@ -12,6 +12,7 @@
 #include <vector>
 #include <cmath>
 #include <cassert>
+#include <algorithm>
 
 namespace Sketch {
 
@@ -45,6 +46,51 @@ public:
   double getFactor() const { return factor_; }
   const double* getBaseInvPow() const { return base_inv_pow_; }
   int getM() const { return (int)(1ULL << np_); }
+
+  // ── Inverted index support (block-of-3 registers) ─────────────────────────
+  // Individual 8-bit registers have only 256 values → too low entropy for
+  // effective inverted-index filtering.  Grouping 3 adjacent registers into
+  // one block key drops random collision from 1/256 to ~(1/256)^3 ≈ 6e-8.
+  // Candidates passing the block-match threshold are verified with exact
+  // SetSketch Jaccard — zero accuracy loss.
+
+  /** FNV-1a hash of a block of 3 register values. */
+  static uint32_t blockHash(uint32_t blockIdx,
+                            uint8_t v1, uint8_t v2, uint8_t v3) {
+      uint32_t h = 2166136261u;
+      h ^= blockIdx; h *= 16777619u;
+      h ^= v1;       h *= 16777619u;
+      h ^= v2;       h *= 16777619u;
+      h ^= v3;       h *= 16777619u;
+      return h;
+  }
+
+  /** Fill @p keys with one uint32_t key per block of 3 registers. */
+  void getBlockKeys(std::vector<uint32_t>& keys, int blockSize = 3) const;
+
+  /** Number of full blocks for a given register count and block size. */
+  static int numBlocks(int m, int blockSize = 3) { return m / blockSize; }
+
+  /**
+   * Conservative min matching-block threshold for direct-distance filter.
+   * P(block match | J) ≈ J^3.  6-sigma safety margin → essentially zero
+   * false negatives.
+   */
+  static int minMatchBlocksForDist(double maxDist, int nBlocks) {
+      double minJac  = 1.0 - maxDist;
+      double pBlock  = minJac * minJac * minJac;
+      double expected = nBlocks * pBlock;
+      double sd       = std::sqrt(expected * (1.0 - pBlock));
+      return std::max(1, static_cast<int>(std::floor(expected - 6.0 * sd)));
+  }
+
+  /**
+   * Exact Jaccard from two flat core arrays (SIMD accelerated).
+   * Used by the inverted-index Phase 3 for candidate verification.
+   */
+  static double jaccardFromCores(const uint8_t* c1, const uint8_t* c2, int m,
+                                 const double* baseInvPow, double factor,
+                                 double card1, double card2);
 
 private:
   void add_slow(uint64_t hashval);

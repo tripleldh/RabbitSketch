@@ -44,6 +44,7 @@
 #include "Sketch.h"
 #include "probmh.h"
 #include "fastkmv.h"
+#include "BinDash.h"
 #include "common.h"
 
 #include <omp.h>
@@ -357,11 +358,9 @@ int main(int argc, char* argv[])
         double kmv_j = kv1.jaccard(kv2);
 
         // ── WeightedPMH (m=1024, k=21, Shannon entropy weights) ──────────
-        // Both sequences use the same weight array: entropy is an intrinsic
-        // property of the k-mer, so the same k-mer has the same weight in both.
         Sketch::ProbMinHash4 wp1(1024, 21, 42), wp2(1024, 21, 42);
-        wp1.updateWeighted(seq_a.data(), seq_length, w.data());
-        wp2.updateWeighted(seq_b.data(), seq_length, w.data());
+        wp1.updateEntropy(seq_a.data(), seq_length);
+        wp2.updateEntropy(seq_b.data(), seq_length);
         double wpmh_j = wp1.jaccard(wp2);
 
         PairResult& r = results[idx];
@@ -580,12 +579,12 @@ int main(int argc, char* argv[])
         kv1.update(seq_a.data(), La); kv2.update(seq_b.data(), Lb);
         double kmv_j = kv1.jaccard(kv2);
 
-        // Weighted PMH — reuses wB_ptr computed above for ground truth.
+        // Weighted PMH — fused entropy-weighted update (no extra allocation).
         double wpmh_j = 0.0;
         if (nwinA > 0 && nwinB > 0) {
             Sketch::ProbMinHash4 wp1(1024, 21, 42), wp2(1024, 21, 42);
-            wp1.updateWeighted(seq_a.data(), La, w.data());
-            wp2.updateWeighted(seq_b.data(), Lb, wB_ptr);
+            wp1.updateEntropy(seq_a.data(), La);
+            wp2.updateEntropy(seq_b.data(), Lb);
             wpmh_j = wp1.jaccard(wp2);
         }
 
@@ -732,11 +731,6 @@ int main(int argc, char* argv[])
                              ? exact_j_clean(sub_at_clean, L_clean, k21)
                              : 0.0;
 
-            // Shannon entropy weights (intrinsic to each k-mer sequence)
-            vector<double> w_a, w_b;
-            fill_kmer_entropy_weights(w_a, seq_a.data(), (uint64_t)seq_length, k21);
-            fill_kmer_entropy_weights(w_b, seq_b.data(), (uint64_t)seq_length, k21);
-
             // Unweighted ProbMH on full sequence
             Sketch::ProbMinHash4 pm1(1024, k21, 42), pm2(1024, k21, 42);
             pm1.update(seq_a.data(), seq_length);
@@ -745,8 +739,8 @@ int main(int argc, char* argv[])
 
             // Weighted PMH on full sequence (low-complexity k-mers downweighted)
             Sketch::ProbMinHash4 wp1(1024, k21, 42), wp2(1024, k21, 42);
-            wp1.updateWeighted(seq_a.data(), seq_length, w_a.data());
-            wp2.updateWeighted(seq_b.data(), seq_length, w_b.data());
+            wp1.updateEntropy(seq_a.data(), seq_length);
+            wp2.updateEntropy(seq_b.data(), seq_length);
             double wpmh_j = wp1.jaccard(wp2);
 
             lc[idx] = {p, j_clean, pmh_j, wpmh_j};
@@ -890,7 +884,7 @@ int main(int argc, char* argv[])
         int    pair_id;
         double rate;
         double gt_j21, gt_j20, gt_j32;
-        double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j, kmv_j;
+        double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j, kmv_j, bd_j;
     };
     std::vector<FileResult> fres(n_file_pairs);
 
@@ -915,7 +909,7 @@ int main(int argc, char* argv[])
         std::string sb = read_fasta(pb);
         if (sa.empty() || sb.empty()) {
             io_errors++;
-            fres[idx] = {pair_id, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+            fres[idx] = {pair_id, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
             continue;
         }
 
@@ -956,8 +950,8 @@ int main(int argc, char* argv[])
         double mh_j = m1.jaccard(&m2);
 
         Sketch::ProbMinHash4 pm1(1024, 21, 42), pm2(1024, 21, 42);
-        pm1.update(sa.data(), (int)sa.size());
-        pm2.update(sb.data(), (int)sb.size());
+        pm1.updateEntropy(sa.data(), sa.size());
+        pm2.updateEntropy(sb.data(), sb.size());
         double pmh_j = pm1.jaccard(pm2);
 
         Sketch::ProbMinHash4OP op1(1024, 21, 42), op2(1024, 21, 42);
@@ -970,9 +964,14 @@ int main(int argc, char* argv[])
         kv2.update(sb.data(), (int)sb.size());
         double kmv_j = kv1.jaccard(kv2);
 
+        Sketch::BinDash bd1(16, 21, 16, 42), bd2(16, 21, 16, 42);
+        bd1.update(sa.data(), sa.size());
+        bd2.update(sb.data(), sb.size());
+        double bd_j = bd1.jaccard(bd2);
+
         fres[idx] = {pair_id, rate, gt_j21, gt_j20, gt_j32,
                      hll_j, ss_j, fres[idx].kssd_j,
-                     mh_j, pmh_j, oph_j, kmv_j};
+                     mh_j, pmh_j, oph_j, kmv_j, bd_j};
     }
 
     double tf1 = get_sec();
@@ -982,8 +981,8 @@ int main(int argc, char* argv[])
 
     // ── accumulate errors per rate ────────────────────────────────────────
     struct FAcc {
-        double hll=0,ss=0,kd=0,mh=0,pmh=0,oph=0,kmv=0;
-        double hll2=0,ss2=0,kd2=0,mh2=0,pmh2=0,oph2=0,kmv2=0;
+        double hll=0,ss=0,kd=0,mh=0,pmh=0,oph=0,kmv=0,bd=0;
+        double hll2=0,ss2=0,kd2=0,mh2=0,pmh2=0,oph2=0,kmv2=0,bd2=0;
         int n=0;
     };
     std::vector<FAcc> facc(n_rates);
@@ -1001,6 +1000,7 @@ int main(int argc, char* argv[])
         double ep = r.pmh_j  - r.gt_j21;
         double eo = r.oph_j  - r.gt_j21;
         double ev = r.kmv_j  - r.gt_j21;
+        double eb = r.bd_j   - r.gt_j21;
         a.hll+=fabs(eh);  a.hll2+=sq(eh);
         a.ss +=fabs(es);  a.ss2 +=sq(es);
         a.kd +=fabs(ek);  a.kd2 +=sq(ek);
@@ -1008,15 +1008,16 @@ int main(int argc, char* argv[])
         a.pmh+=fabs(ep);  a.pmh2+=sq(ep);
         a.oph+=fabs(eo);  a.oph2+=sq(eo);
         a.kmv+=fabs(ev);  a.kmv2+=sq(ev);
+        a.bd +=fabs(eb);  a.bd2 +=sq(eb);
         a.n++;
     }
 
     // ── print table ───────────────────────────────────────────────────────
     fprintf(stderr,
-        "        ──── k=32 ────  ─ k=20 ─  ───────────────────── k=21 (exact GT) ──────────\n"
-        "rate      HLL    SS     KSSD     MinHash  ProbMH  OnePerm    KMV\n"
-        "        [MAE]  [MAE]   [MAE]     [MAE]    [MAE]    [MAE]   [MAE]\n"
-        "───────  ──────────────────────────────────────────────────────────────────────────\n");
+        "        ──── k=32 ────  ─ k=20 ─  ───────────────────────── k=21 (exact GT) ────────────\n"
+        "rate      HLL    SS     KSSD     MinHash  ProbMH  OnePerm    KMV   BinDash\n"
+        "        [MAE]  [MAE]   [MAE]     [MAE]    [MAE]    [MAE]   [MAE]   [MAE]\n"
+        "───────  ────────────────────────────────────────────────────────────────────────────────\n");
 
     FAcc gf;
     for (int ri = 0; ri < n_rates; ri++) {
@@ -1024,35 +1025,35 @@ int main(int argc, char* argv[])
         if (a.n == 0) continue;
         double N = (double)a.n;
         fprintf(stderr,
-            "%.3f   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f\n",
+            "%.3f   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f  %7.4f\n",
             rates[ri],
             a.hll/N, a.ss/N, a.kd/N,
-            a.mh/N, a.pmh/N, a.oph/N, a.kmv/N);
+            a.mh/N, a.pmh/N, a.oph/N, a.kmv/N, a.bd/N);
         gf.hll+=a.hll; gf.ss+=a.ss; gf.kd+=a.kd;
-        gf.mh+=a.mh;   gf.pmh+=a.pmh; gf.oph+=a.oph; gf.kmv+=a.kmv;
+        gf.mh+=a.mh;   gf.pmh+=a.pmh; gf.oph+=a.oph; gf.kmv+=a.kmv; gf.bd+=a.bd;
         gf.hll2+=a.hll2; gf.ss2+=a.ss2; gf.kd2+=a.kd2;
-        gf.mh2+=a.mh2; gf.pmh2+=a.pmh2; gf.oph2+=a.oph2; gf.kmv2+=a.kmv2;
+        gf.mh2+=a.mh2; gf.pmh2+=a.pmh2; gf.oph2+=a.oph2; gf.kmv2+=a.kmv2; gf.bd2+=a.bd2;
         gf.n+=a.n;
     }
     double TF = (double)gf.n;
     fprintf(stderr,
-        "───────  ──────────────────────────────────────────────────────────────────────────\n"
-        "MAE    %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f\n"
-        "RMSE   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f\n"
+        "───────  ────────────────────────────────────────────────────────────────────────────────\n"
+        "MAE    %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f  %7.4f\n"
+        "RMSE   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f  %7.4f\n"
         "time: %.1f s\n",
         gf.hll/TF, gf.ss/TF, gf.kd/TF,
-        gf.mh/TF, gf.pmh/TF, gf.oph/TF, gf.kmv/TF,
+        gf.mh/TF, gf.pmh/TF, gf.oph/TF, gf.kmv/TF, gf.bd/TF,
         sqrt(gf.hll2/TF), sqrt(gf.ss2/TF), sqrt(gf.kd2/TF),
-        sqrt(gf.mh2/TF), sqrt(gf.pmh2/TF), sqrt(gf.oph2/TF), sqrt(gf.kmv2/TF),
+        sqrt(gf.mh2/TF), sqrt(gf.pmh2/TF), sqrt(gf.oph2/TF), sqrt(gf.kmv2/TF), sqrt(gf.bd2/TF),
         tf1 - tf0);
 
     // machine-readable line for script parsing
     fprintf(stdout,
         "PARSE_FILE dir=%s n=%d MAE_HLL=%.4f MAE_SS=%.4f MAE_KSSD=%.4f "
-        "MAE_MH=%.4f MAE_PMH=%.4f MAE_OPH=%.4f MAE_KMV=%.4f\n",
+        "MAE_MH=%.4f MAE_PMH=%.4f MAE_OPH=%.4f MAE_KMV=%.4f MAE_BD=%.4f\n",
         bench_dir.c_str(), gf.n,
         gf.hll/TF, gf.ss/TF, gf.kd/TF,
-        gf.mh/TF, gf.pmh/TF, gf.oph/TF, gf.kmv/TF);
+        gf.mh/TF, gf.pmh/TF, gf.oph/TF, gf.kmv/TF, gf.bd/TF);
 
     return 0;
 }   // end §4
