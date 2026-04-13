@@ -23,6 +23,7 @@
 #include <iostream>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 
 using namespace std;
 
@@ -47,6 +48,10 @@ int main(int argc, char* argv[])
     { string line; while (getline(fs, line)) if (!line.empty()) fileList.push_back(line); }
     const int N = (int)fileList.size();
     cerr << "===== total files: " << N << "  (BinDash)" << endl;
+    if (N == 0) {
+        cerr << "no input files found in: " << inputFile << endl;
+        return 1;
+    }
 
     static const uint32_t SKETCH64 = 16;
     static const int      KSIZE    = 21;
@@ -55,10 +60,7 @@ int main(int argc, char* argv[])
     const uint32_t NBINS = SKETCH64 * 64;
 
     const int actualThreads = min(nThreads, N);
-    vector<Sketch::BinDash> sketches;
-    sketches.reserve(N);
-    for (int i = 0; i < N; ++i)
-        sketches.emplace_back(SKETCH64, KSIZE, BBITS, SEED);
+    vector<optional<Sketch::BinDash>> sketches(N);
 
     double t0 = get_sec();
 
@@ -70,10 +72,12 @@ int main(int argc, char* argv[])
             gzFile fp = gzopen(fileList[t].c_str(), "r");
             if (!fp) continue;
             kseq_t* ks = kseq_init(fp);
+            sketches[t].emplace(SKETCH64, KSIZE, BBITS, SEED);
+            auto& sk = *sketches[t];
 
             while (kseq_read(ks) >= 0)
-                sketches[t].update(ks->seq.s, ks->seq.l);
-            sketches[t].finalize();
+                sk.update(ks->seq.s, ks->seq.l);
+            sk.finalize();
 
             kseq_destroy(ks);
             gzclose(fp);
@@ -100,13 +104,15 @@ int main(int argc, char* argv[])
     #pragma omp parallel num_threads(actualThreads)
     {
         string buf;
-        buf.reserve(1 << 20);
+        buf.reserve(1 << 16); // 64KB per thread, lower peak memory than 1MB/thread
 
         #pragma omp for schedule(dynamic, 8)
         for (int i = 0; i < N; ++i) {
-            const auto& si = sketches[i];
+            if (!sketches[i]) continue;
+            const auto& si = *sketches[i];
             for (int j = i + 1; j < N; ++j) {
-                const auto& sj = sketches[j];
+                if (!sketches[j]) continue;
+                const auto& sj = *sketches[j];
                 const double jac = si.jaccard(sj);
                 if (jac < minJac) continue;
 
@@ -119,7 +125,7 @@ int main(int argc, char* argv[])
                     buf.append(line, static_cast<size_t>(n));
                 }
             }
-            if (buf.size() > (1 << 20)) {
+            if (buf.size() > (1 << 16)) {
                 #pragma omp critical
                 { fwrite(buf.data(), 1, buf.size(), fout); }
                 buf.clear();

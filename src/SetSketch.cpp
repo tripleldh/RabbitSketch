@@ -286,7 +286,8 @@ void SetSketch::update(char* seq) {
   }
 
   const int lanes = 8;
-  const uint64_t N = ((LENGTH - KMERLEN) / lanes) * lanes;
+  const uint64_t total_kmers = LENGTH - KMERLEN + 1;
+  const uint64_t N = (total_kmers / lanes) * lanes;
 
   for (uint64_t i = 0; i < N; i += lanes) {
     uint64_t resv[8];
@@ -412,7 +413,7 @@ void SetSketch::update(char* seq) {
   }
 
   // ── Remainder loop ──────────────────────────────────────────────────────
-  for (uint64_t i = N; i < LENGTH - KMERLEN; ++i) {
+  for (uint64_t i = N; i < total_kmers; ++i) {
     if (invalid_count == 0) {
       uint64_t res = (fwd_enc <= rev_enc) ? fwd_enc : rev_enc;
       uint64_t hashval = mc::murmur3_fmix(res, 42);

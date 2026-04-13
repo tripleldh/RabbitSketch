@@ -63,6 +63,7 @@ public:
      * Triggers finalization on first call.
      */
     double jaccard(const BinDash& other) const;
+    double jaccardPacked(const BinDash& other) const;
 
     double distance(const BinDash& other) const {
         return 1.0 - jaccard(other);
@@ -98,12 +99,9 @@ private:
 
     std::vector<uint64_t> signs_;   // [nbins_] per-bin minimum hash (temporary)
     std::vector<uint64_t> usigs_;   // [sketchsize64_*bbits_] bit-packed (final)
-    mutable std::vector<uint16_t> binvals_; // [nbins_] decoded low-bbits values
     mutable bool finalized_;
-    mutable bool binvals_ready_;
 
     void ensureFinalized() const;
-    void ensureBinVals() const;
     void densify();
     void packBits();
 };

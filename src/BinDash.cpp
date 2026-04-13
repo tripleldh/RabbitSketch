@@ -61,10 +61,8 @@ BinDash::BinDash(uint32_t sketchsize64, int kmer_size,
       seed_(seed),
       nbins_(sketchsize64 * 64),
       signs_(sketchsize64 * 64, UINT64_MAX),
-      usigs_(sketchsize64 * bbits, 0),
-      binvals_(),
-      finalized_(false),
-      binvals_ready_(false)
+      usigs_(),
+      finalized_(false)
 {
     assert(sketchsize64 > 0);
     assert(kmer_size >= 1 && kmer_size <= 32);
@@ -81,7 +79,6 @@ void BinDash::update(const char* seq) {
 
 void BinDash::update(const char* seq, uint64_t length) {
     finalized_ = false;
-    binvals_ready_ = false;
 
     const int K = kmer_size_;
     if (length < static_cast<uint64_t>(K)) return;
@@ -161,7 +158,10 @@ void BinDash::densify() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void BinDash::packBits() {
-    std::fill(usigs_.begin(), usigs_.end(), 0ULL);
+    if (usigs_.size() != static_cast<size_t>(sketchsize64_) * bbits_)
+        usigs_.assign(static_cast<size_t>(sketchsize64_) * bbits_, 0ULL);
+    else
+        std::fill(usigs_.begin(), usigs_.end(), 0ULL);
     const uint32_t bb = bbits_;
     for (uint32_t signidx = 0; signidx < nbins_; signidx++) {
         uint64_t sign = signs_[signidx];
@@ -183,7 +183,6 @@ void BinDash::finalize() {
     packBits();
     { std::vector<uint64_t>().swap(signs_); }
     finalized_ = true;
-    binvals_ready_ = false;
 }
 
 void BinDash::ensureFinalized() const {
@@ -191,43 +190,47 @@ void BinDash::ensureFinalized() const {
     const_cast<BinDash*>(this)->finalize();
 }
 
-void BinDash::ensureBinVals() const {
-    ensureFinalized();
-    if (binvals_ready_) return;
-    binvals_.resize(nbins_);
-    const uint32_t bb = bbits_;
-    for (uint32_t bin = 0; bin < nbins_; ++bin) {
-        const uint32_t word = bin / 64;
-        const uint32_t bit  = bin % 64;
-        uint16_t val = 0;
-        for (uint32_t b = 0; b < bb; ++b)
-            val |= static_cast<uint16_t>(((usigs_[word * bb + b] >> bit) & 1ULL) << b);
-        binvals_[bin] = val;
-    }
-    binvals_ready_ = true;
-}
-
-static inline uint64_t bd_count_same_u16(const uint16_t* a, const uint16_t* b, uint32_t n) {
-    uint32_t i = 0;
+static inline uint64_t bd_count_same_packed(const uint64_t* a, const uint64_t* b,
+                                            uint32_t sketchsize64, uint32_t bbits) {
     uint64_t same = 0;
-#if defined(__AVX512BW__)
-    for (; i + 32 <= n; i += 32) {
-        __m512i va = _mm512_loadu_si512((const void*)(a + i));
-        __m512i vb = _mm512_loadu_si512((const void*)(b + i));
-        __mmask32 m = _mm512_cmpeq_epi16_mask(va, vb);
-        same += static_cast<uint64_t>(__builtin_popcount(m));
-    }
+    for (uint32_t g = 0; g < sketchsize64; ++g) {
+        uint64_t eqmask = ~0ULL;
+        const uint32_t base = g * bbits;
+        uint32_t bit = 0;
+
+#if defined(__AVX512F__)
+        const __m512i all1_512 = _mm512_set1_epi64(-1LL);
+        __m512i eqv512 = all1_512;
+        for (; bit + 8 <= bbits; bit += 8) {
+            const __m512i va = _mm512_loadu_si512((const void*)(a + base + bit));
+            const __m512i vb = _mm512_loadu_si512((const void*)(b + base + bit));
+            const __m512i x  = _mm512_xor_si512(va, vb);
+            const __m512i xn = _mm512_andnot_si512(x, all1_512); // XNOR
+            eqv512 = _mm512_and_si512(eqv512, xn);
+        }
+        alignas(64) uint64_t lanes512[8];
+        _mm512_store_si512((void*)lanes512, eqv512);
+        eqmask &= lanes512[0] & lanes512[1] & lanes512[2] & lanes512[3]
+               & lanes512[4] & lanes512[5] & lanes512[6] & lanes512[7];
 #elif defined(__AVX2__)
-    for (; i + 16 <= n; i += 16) {
-        __m256i va = _mm256_loadu_si256((const __m256i*)(a + i));
-        __m256i vb = _mm256_loadu_si256((const __m256i*)(b + i));
-        __m256i cmp = _mm256_cmpeq_epi16(va, vb);
-        same += static_cast<uint64_t>(
-            __builtin_popcount(static_cast<uint32_t>(_mm256_movemask_epi8(cmp))) >> 1);
-    }
+        const __m256i all1_256 = _mm256_set1_epi64x(-1LL);
+        __m256i eqv256 = all1_256;
+        for (; bit + 4 <= bbits; bit += 4) {
+            const __m256i va = _mm256_loadu_si256((const __m256i*)(a + base + bit));
+            const __m256i vb = _mm256_loadu_si256((const __m256i*)(b + base + bit));
+            const __m256i x  = _mm256_xor_si256(va, vb);
+            const __m256i xn = _mm256_andnot_si256(x, all1_256); // XNOR
+            eqv256 = _mm256_and_si256(eqv256, xn);
+        }
+        alignas(32) uint64_t lanes256[4];
+        _mm256_store_si256((__m256i*)lanes256, eqv256);
+        eqmask &= lanes256[0] & lanes256[1] & lanes256[2] & lanes256[3];
 #endif
-    for (; i < n; ++i)
-        same += (a[i] == b[i]);
+
+        for (; bit < bbits; ++bit)
+            eqmask &= ~(a[base + bit] ^ b[base + bit]); // XNOR
+        same += static_cast<uint64_t>(__builtin_popcountll(eqmask));
+    }
     return same;
 }
 
@@ -235,14 +238,15 @@ static inline uint64_t bd_count_same_u16(const uint16_t* a, const uint16_t* b, u
 // jaccard – XNOR + AND across bbits layers, popcount
 // ═══════════════════════════════════════════════════════════════════════════
 
-double BinDash::jaccard(const BinDash& other) const {
+double BinDash::jaccardPacked(const BinDash& other) const {
     assert(sketchsize64_ == other.sketchsize64_);
     assert(bbits_ == other.bbits_);
 
-    ensureBinVals();
-    other.ensureBinVals();
+    ensureFinalized();
+    other.ensureFinalized();
 
-    const uint64_t samebits = bd_count_same_u16(binvals_.data(), other.binvals_.data(), nbins_);
+    const uint64_t samebits = bd_count_same_packed(usigs_.data(), other.usigs_.data(),
+                                                   sketchsize64_, bbits_);
     const double maxnbits = static_cast<double>(nbins_);
     const double p_match  = static_cast<double>(samebits) / maxnbits;
     const double p_random = 1.0 / static_cast<double>(1ULL << bbits_);
@@ -250,6 +254,10 @@ double BinDash::jaccard(const BinDash& other) const {
     if (j < 0.0) j = 0.0;
     if (j > 1.0) j = 1.0;
     return j;
+}
+
+double BinDash::jaccard(const BinDash& other) const {
+    return jaccardPacked(other);
 }
 
 #undef BD_ENC
