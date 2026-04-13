@@ -628,25 +628,6 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
     const int K = kmer_size_;
     if (length < static_cast<uint64_t>(K)) return;
 
-    // ── Accumulate total_weight_ (O(L) rolling-window pre-pass) ───────────
-    // For each valid k-mer position (no invalid bases in window), add weight.
-    {
-        int inv = 0;
-        for (int i = 0; i < K - 1; ++i)
-            if (!PMH_VALID(PMH_ENC(seq[i]))) ++inv;
-        const uint64_t n_kmers = length - static_cast<uint64_t>(K) + 1;
-        for (uint64_t pos = 0; pos < n_kmers; ++pos) {
-            if (!PMH_VALID(PMH_ENC(seq[pos + K - 1]))) ++inv;
-            if (inv == 0) {
-                double w = (weight_per_kmer_start != nullptr)
-                               ? weight_per_kmer_start[pos]
-                               : uniform_weight;
-                if (w > 0.0) total_weight_ += w;
-            }
-            if (!PMH_VALID(PMH_ENC(seq[pos]))) --inv;
-        }
-    }
-
     const uint64_t loc_seed = seed_;
 
     const uint64_t kmer_mask = (K == 32) ? ~0ULL : ((1ULL << (2 * K)) - 1);
@@ -668,11 +649,21 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
     for (uint64_t i = 0; i < N_batch; i += lanes) {
         uint64_t resv[8];
         bool     lane_valid[8];
+        double   batch_w[8];
 
         for (int j = 0; j < lanes; ++j) {
             uint64_t pos = i + j;
             lane_valid[j] = (inv == 0);
             resv[j] = lane_valid[j] ? ((fwd <= rev) ? fwd : rev) : 0;
+            double w = uniform_weight;
+            if (weight_per_kmer_start != nullptr)
+                w *= weight_per_kmer_start[pos];
+            if (lane_valid[j] && w > 0.0) {
+                batch_w[j] = w;
+                total_weight_ += w;
+            } else {
+                batch_w[j] = 0.0;
+            }
             uint8_t ef_out = PMH_ENC(seq[pos]);
             uint8_t ef_in  = PMH_ENC(seq[pos + K]);
             if (!PMH_VALID(ef_out)) inv--;
@@ -758,30 +749,18 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
             // Lanes with hv_fast >= 1.0 must enter addHashFromRng regardless.
             const uint8_t above1 = (uint8_t)_mm512_cmp_pd_mask(vhf, vone, _CMP_GE_OQ);
 
-            uint8_t candidates;
-            if (weight_per_kmer_start != nullptr) {
-                // Per-lane threshold = cur_max * uniform_weight * w[j].
-                __m512d vw     = _mm512_loadu_pd(weight_per_kmer_start + i);
-                __m512d vthresh = _mm512_mul_pd(
-                    _mm512_set1_pd(cur_max * uniform_weight), vw);
-                const uint8_t blt  = (uint8_t)_mm512_cmp_pd_mask(vhf, vthresh, _CMP_LT_OQ);
-                const uint8_t wpos = (uint8_t)_mm512_cmp_pd_mask(
-                    vw, _mm512_setzero_pd(), _CMP_GT_OQ);
-                candidates = lv_mask & (((above1 | blt)) & wpos);
-            } else {
-                // Constant threshold for all lanes.
-                const uint8_t blt = (uint8_t)_mm512_cmp_pd_mask(
-                    vhf, _mm512_set1_pd(cur_max * uniform_weight), _CMP_LT_OQ);
-                candidates = lv_mask & (above1 | blt);
-            }
+            __m512d vw      = _mm512_loadu_pd(batch_w);
+            __m512d vthresh = _mm512_mul_pd(_mm512_set1_pd(cur_max), vw);
+            const uint8_t blt  = (uint8_t)_mm512_cmp_pd_mask(vhf, vthresh, _CMP_LT_OQ);
+            const uint8_t wpos = (uint8_t)_mm512_cmp_pd_mask(
+                vw, _mm512_setzero_pd(), _CMP_GT_OQ);
+            uint8_t candidates = lv_mask & ((above1 | blt) & wpos);
 
             // Inner loop runs only for candidates – typically 0 iterations.
             while (candidates) {
                 const int j = __builtin_ctz(candidates);
                 candidates &= (uint8_t)(candidates - 1);
-                double w = uniform_weight;
-                if (weight_per_kmer_start != nullptr)
-                    w *= weight_per_kmer_start[i + j];
+                const double w = batch_w[j];
                 // Re-check: cur_max may have tightened from a previous lane.
                 if (__builtin_expect(hv_fastv[j] < 1.0, 1) &&
                     hv_fastv[j] >= cur_max * w)
@@ -794,9 +773,7 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
         // Scalar fallback (non-AVX-512).
         for (int j = 0; j < lanes; ++j) {
             if (!lane_valid[j]) continue;
-            double w = uniform_weight;
-            if (weight_per_kmer_start != nullptr)
-                w *= weight_per_kmer_start[i + j];
+            const double w = batch_w[j];
             if (!(w > 0.0))
                 continue;
             const double hv_fast = hv_fastv[j];
@@ -818,6 +795,7 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
             if (weight_per_kmer_start != nullptr)
                 w *= weight_per_kmer_start[i];
             if (w > 0.0) {
+                total_weight_ += w;
                 const uint64_t canonical = (fwd <= rev) ? fwd : rev;
 #ifdef PMH_FAST_HASH
                 uint64_t rng_inner = mc::murmur3_fmix(canonical, loc_seed);

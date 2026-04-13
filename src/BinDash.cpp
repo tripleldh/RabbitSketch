@@ -18,6 +18,7 @@
 #include <cassert>
 #include <climits>
 #include <cstring>
+#include <immintrin.h>
 
 using namespace Sketch;
 
@@ -61,7 +62,9 @@ BinDash::BinDash(uint32_t sketchsize64, int kmer_size,
       nbins_(sketchsize64 * 64),
       signs_(sketchsize64 * 64, UINT64_MAX),
       usigs_(sketchsize64 * bbits, 0),
-      finalized_(false)
+      binvals_(),
+      finalized_(false),
+      binvals_ready_(false)
 {
     assert(sketchsize64 > 0);
     assert(kmer_size >= 1 && kmer_size <= 32);
@@ -78,6 +81,7 @@ void BinDash::update(const char* seq) {
 
 void BinDash::update(const char* seq, uint64_t length) {
     finalized_ = false;
+    binvals_ready_ = false;
 
     const int K = kmer_size_;
     if (length < static_cast<uint64_t>(K)) return;
@@ -179,11 +183,52 @@ void BinDash::finalize() {
     packBits();
     { std::vector<uint64_t>().swap(signs_); }
     finalized_ = true;
+    binvals_ready_ = false;
 }
 
 void BinDash::ensureFinalized() const {
     if (finalized_) return;
     const_cast<BinDash*>(this)->finalize();
+}
+
+void BinDash::ensureBinVals() const {
+    ensureFinalized();
+    if (binvals_ready_) return;
+    binvals_.resize(nbins_);
+    const uint32_t bb = bbits_;
+    for (uint32_t bin = 0; bin < nbins_; ++bin) {
+        const uint32_t word = bin / 64;
+        const uint32_t bit  = bin % 64;
+        uint16_t val = 0;
+        for (uint32_t b = 0; b < bb; ++b)
+            val |= static_cast<uint16_t>(((usigs_[word * bb + b] >> bit) & 1ULL) << b);
+        binvals_[bin] = val;
+    }
+    binvals_ready_ = true;
+}
+
+static inline uint64_t bd_count_same_u16(const uint16_t* a, const uint16_t* b, uint32_t n) {
+    uint32_t i = 0;
+    uint64_t same = 0;
+#if defined(__AVX512BW__)
+    for (; i + 32 <= n; i += 32) {
+        __m512i va = _mm512_loadu_si512((const void*)(a + i));
+        __m512i vb = _mm512_loadu_si512((const void*)(b + i));
+        __mmask32 m = _mm512_cmpeq_epi16_mask(va, vb);
+        same += static_cast<uint64_t>(__builtin_popcount(m));
+    }
+#elif defined(__AVX2__)
+    for (; i + 16 <= n; i += 16) {
+        __m256i va = _mm256_loadu_si256((const __m256i*)(a + i));
+        __m256i vb = _mm256_loadu_si256((const __m256i*)(b + i));
+        __m256i cmp = _mm256_cmpeq_epi16(va, vb);
+        same += static_cast<uint64_t>(
+            __builtin_popcount(static_cast<uint32_t>(_mm256_movemask_epi8(cmp))) >> 1);
+    }
+#endif
+    for (; i < n; ++i)
+        same += (a[i] == b[i]);
+    return same;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -194,24 +239,13 @@ double BinDash::jaccard(const BinDash& other) const {
     assert(sketchsize64_ == other.sketchsize64_);
     assert(bbits_ == other.bbits_);
 
-    ensureFinalized();
-    other.ensureFinalized();
+    ensureBinVals();
+    other.ensureBinVals();
 
-    const uint32_t ss64 = sketchsize64_;
-    const uint32_t bb   = bbits_;
-    uint64_t samebits = 0;
-
-    for (uint32_t i = 0; i < ss64; i++) {
-        uint64_t bits = ~0ULL;
-        for (uint32_t j = 0; j < bb; j++) {
-            bits &= ~(usigs_[i * bb + j] ^ other.usigs_[i * bb + j]);
-        }
-        samebits += __builtin_popcountll(bits);
-    }
-
-    const double maxnbits = static_cast<double>(ss64) * 64.0;
+    const uint64_t samebits = bd_count_same_u16(binvals_.data(), other.binvals_.data(), nbins_);
+    const double maxnbits = static_cast<double>(nbins_);
     const double p_match  = static_cast<double>(samebits) / maxnbits;
-    const double p_random = 1.0 / static_cast<double>(1ULL << bb);
+    const double p_random = 1.0 / static_cast<double>(1ULL << bbits_);
     double j = (p_match - p_random) / (1.0 - p_random);
     if (j < 0.0) j = 0.0;
     if (j > 1.0) j = 1.0;

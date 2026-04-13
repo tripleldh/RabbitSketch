@@ -98,9 +98,12 @@ private:
 
     std::vector<uint64_t> signs_;   // [nbins_] per-bin minimum hash (temporary)
     std::vector<uint64_t> usigs_;   // [sketchsize64_*bbits_] bit-packed (final)
+    mutable std::vector<uint16_t> binvals_; // [nbins_] decoded low-bbits values
     mutable bool finalized_;
+    mutable bool binvals_ready_;
 
     void ensureFinalized() const;
+    void ensureBinVals() const;
     void densify();
     void packBits();
 };

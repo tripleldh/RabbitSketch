@@ -51,51 +51,70 @@ InvertedIndex<KeyT> buildCSRIndex(
 {
     constexpr int NUM_SHARDS = 64;
     const KeyT SHARD_MASK = static_cast<KeyT>(NUM_SHARDS - 1);
+    const int tCount = static_cast<int>(threadIdx.size());
 
     std::vector<phmap::flat_hash_map<KeyT, std::vector<uint32_t>>> invShards(NUM_SHARDS);
 
-    // Parallel shard merge
+    // Phase 2.1: thread-local re-shard (no locks)
     {
-        omp_lock_t locks[NUM_SHARDS];
-        for (int s = 0; s < NUM_SHARDS; s++) omp_init_lock(&locks[s]);
+        std::vector<std::vector<phmap::flat_hash_map<KeyT, std::vector<uint32_t>>>> localShards(
+            tCount, std::vector<phmap::flat_hash_map<KeyT, std::vector<uint32_t>>>(NUM_SHARDS));
 
-        #pragma omp parallel num_threads(nThreads)
+        #pragma omp parallel for num_threads(nThreads) schedule(static)
+        for (int tid = 0; tid < tCount; ++tid)
         {
-            int tid = omp_get_thread_num();
             for (auto& [key, vec] : threadIdx[tid]) {
                 int shard = static_cast<int>(key & SHARD_MASK);
-                omp_set_lock(&locks[shard]);
-                auto [it, ins] = invShards[shard].try_emplace(key, std::move(vec));
-                if (!ins)
-                    it->second.insert(it->second.end(), vec.begin(), vec.end());
-                omp_unset_lock(&locks[shard]);
+                auto& shardMap = localShards[tid][shard];
+                auto [it, ins] = shardMap.try_emplace(key, std::move(vec));
+                if (!ins) {
+                    auto& dst = it->second;
+                    dst.reserve(dst.size() + vec.size());
+                    dst.insert(dst.end(), vec.begin(), vec.end());
+                }
             }
             phmap::flat_hash_map<KeyT, std::vector<uint32_t>>().swap(threadIdx[tid]);
         }
-        for (int s = 0; s < NUM_SHARDS; s++) omp_destroy_lock(&locks[s]);
         threadIdx.clear();
+
+        // Phase 2.2: shard merge across threads
+        #pragma omp parallel for num_threads(nThreads) schedule(dynamic, 1)
+        for (int s = 0; s < NUM_SHARDS; s++) {
+            auto& merged = invShards[s];
+            for (int tid = 0; tid < tCount; ++tid) {
+                auto& src = localShards[tid][s];
+                for (auto& [key, vec] : src) {
+                    auto [it, ins] = merged.try_emplace(key, std::move(vec));
+                    if (!ins) {
+                        auto& dst = it->second;
+                        dst.reserve(dst.size() + vec.size());
+                        dst.insert(dst.end(), vec.begin(), vec.end());
+                    }
+                }
+                phmap::flat_hash_map<KeyT, std::vector<uint32_t>>().swap(src);
+            }
+        }
     }
 
     size_t totalUnique = 0;
     for (auto& sh : invShards) totalUnique += sh.size();
     std::cerr << "merge index: " << totalUnique << " unique keys" << std::endl;
 
-    // Singleton removal
+    // Singleton removal + posting count in one pass
     size_t totalAfter = 0;
-    #pragma omp parallel for num_threads(nThreads) reduction(+:totalAfter)
+    size_t totalPostings = 0;
+    #pragma omp parallel for num_threads(nThreads) reduction(+:totalAfter,totalPostings)
     for (int s = 0; s < NUM_SHARDS; s++) {
         for (auto it = invShards[s].begin(); it != invShards[s].end(); ) {
             if (it->second.size() <= 1) it = invShards[s].erase(it);
-            else { ++it; totalAfter++; }
+            else {
+                totalPostings += it->second.size();
+                ++it;
+                totalAfter++;
+            }
         }
     }
     std::cerr << "singleton removal: " << totalUnique << " -> " << totalAfter << std::endl;
-
-    // Count total postings
-    size_t totalPostings = 0;
-    for (int s = 0; s < NUM_SHARDS; s++)
-        for (auto& [k, v] : invShards[s])
-            totalPostings += v.size();
 
     // Flatten into CSR
     InvertedIndex<KeyT> idx;
@@ -147,8 +166,12 @@ void computeDistances(
     int                                     nThreads)
 {
     const bool useMashDist = (kmerSize > 0);
-    const double inv_kmer = useMashDist ? 1.0 / kmerSize : 0.0;
     const uint32_t* csrPtr = idx.csrPosts.data();
+    double minJacByDist = 1.0 - maxDist;
+    if (useMashDist) {
+        const double p_exp = std::exp(-static_cast<double>(kmerSize) * maxDist);
+        minJacByDist = p_exp / (2.0 - p_exp);
+    }
 
     // Size-ratio pruning (only meaningful for Mash distance mode)
     const double radio = useMashDist
@@ -233,14 +256,7 @@ void computeDistances(
                 if (jac < 0.0) jac = 0.0;
                 if (jac > 1.0) jac = 1.0;
 
-                double dist;
-                if (useMashDist) {
-                    dist = (jac >= 1.0) ? 0.0
-                        : -inv_kmer * std::log(2.0 * jac / (1.0 + jac));
-                } else {
-                    dist = 1.0 - jac;
-                }
-                if (dist < maxDist) {
+                if (jac > minJacByDist) {
                     char line[1024];
                     int n = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
                         fileList[i].c_str(), fileList[j].c_str(), 1.0 - jac);

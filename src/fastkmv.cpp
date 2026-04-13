@@ -95,6 +95,8 @@ FastKMV::FastKMV(uint32_t k, int kmer_size, uint64_t seed)
     : k_(k), kmer_size_(kmer_size), seed_(seed),
       buf_cap_(k * 2),
       vals_(new uint64_t[k * 2]),
+      enc_buf_(nullptr),
+      enc_cap_(0),
       size_(0),
       threshold_(UINT64_MAX),
       sorted_(false)
@@ -109,6 +111,8 @@ FastKMV::FastKMV(const FastKMV& o)
     : k_(o.k_), kmer_size_(o.kmer_size_), seed_(o.seed_),
       buf_cap_(o.buf_cap_),
       vals_(new uint64_t[o.buf_cap_]),
+      enc_buf_(nullptr),
+      enc_cap_(0),
       size_(o.size_),
       threshold_(o.threshold_),
       sorted_(o.sorted_)
@@ -124,6 +128,8 @@ FastKMV& FastKMV::operator=(FastKMV other) {
     std::swap(seed_,      other.seed_);
     std::swap(buf_cap_,   other.buf_cap_);
     std::swap(vals_,      other.vals_);
+    std::swap(enc_buf_,   other.enc_buf_);
+    std::swap(enc_cap_,   other.enc_cap_);
     std::swap(size_,      other.size_);
     std::swap(threshold_, other.threshold_);
     std::swap(sorted_,    other.sorted_);
@@ -220,8 +226,11 @@ void FastKMV::update(const char* seq, uint64_t length) {
     const uint64_t loc_seed = seed_;
 
     // ── Phase 0: SIMD bulk sequence encoding ────────────────────────────
-    std::unique_ptr<uint8_t[]> enc_storage(new uint8_t[length]);
-    uint8_t* enc = enc_storage.get();
+    if (enc_cap_ < length) {
+        enc_buf_.reset(new uint8_t[length]);
+        enc_cap_ = length;
+    }
+    uint8_t* enc = enc_buf_.get();
 
     uint64_t p = 0;
 #if defined(__AVX512BW__)

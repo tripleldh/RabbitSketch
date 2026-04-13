@@ -230,7 +230,7 @@ static double exact_wj_from_subs(const vector<bool>& sub_at,
 struct PairResult {
     double rate;
     double theo_j32, theo_j21, theo_j20;
-    double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j, kmv_j;
+    double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j, kmv_j, bd_j;
     double tl1_j, tl2_j, tl4_j;
     // Weighted PMH evaluation (independent random weights per sequence)
     double wpmh_j;   // weighted PMH estimate
@@ -357,6 +357,12 @@ int main(int argc, char* argv[])
         kv2.update(seq_b.data(), seq_length);
         double kmv_j = kv1.jaccard(kv2);
 
+        // ── BinDash (s=2^16, k=21, b=16) ────────────────────────────────
+        Sketch::BinDash bd1(16, 21, 16, 42), bd2(16, 21, 16, 42);
+        bd1.update(seq_a.data(), seq_length);
+        bd2.update(seq_b.data(), seq_length);
+        double bd_j = bd1.jaccard(bd2);
+
         // ── WeightedPMH (m=1024, k=21, Shannon entropy weights) ──────────
         Sketch::ProbMinHash4 wp1(1024, 21, 42), wp2(1024, 21, 42);
         wp1.updateEntropy(seq_a.data(), seq_length);
@@ -375,6 +381,7 @@ int main(int argc, char* argv[])
         r.pmh_j    = pmh_j;
         r.oph_j    = oph_j;
         r.kmv_j    = kmv_j;
+        r.bd_j     = bd_j;
         r.tl1_j    = tl1_j;
         r.tl2_j    = tl2_j;
         r.tl4_j    = tl4_j;
@@ -387,8 +394,8 @@ int main(int argc, char* argv[])
     // ── Accumulate errors ──────────────────────────────────────────────────
     // Per-rate accumulators
     struct RateAcc {
-        double hll=0, ss=0, kd=0, mh=0, pmh=0, oph=0, kmv=0, wpmh=0;
-        double hll2=0, ss2=0, kd2=0, mh2=0, pmh2=0, oph2=0, kmv2=0, wpmh2=0;
+        double hll=0, ss=0, kd=0, mh=0, pmh=0, oph=0, kmv=0, bd=0, wpmh=0;
+        double hll2=0, ss2=0, kd2=0, mh2=0, pmh2=0, oph2=0, kmv2=0, bd2=0, wpmh2=0;
     };
     vector<RateAcc> acc(n_rates);
     for (int i = 0; i < total_pairs; i++) {
@@ -399,7 +406,7 @@ int main(int argc, char* argv[])
         double j20 = theo_jaccard(rates[ri], 20);
         auto sq = [](double x){ return x*x; };
         double eh=r.hll_j-j32,  es=r.ss_j-j32,  ek=r.kssd_j-j20;
-        double em=r.mh_j-j21,   ep=r.pmh_j-j21, eo=r.oph_j-j21;
+        double em=r.mh_j-j21,   ep=r.pmh_j-j21, eo=r.oph_j-j21, eb=r.bd_j-j21;
         double ev=r.kmv_j-j21,  ew=r.wpmh_j-r.gt_wj;
         acc[ri].hll  +=fabs(eh); acc[ri].hll2  +=sq(eh);
         acc[ri].ss   +=fabs(es); acc[ri].ss2   +=sq(es);
@@ -407,6 +414,7 @@ int main(int argc, char* argv[])
         acc[ri].mh   +=fabs(em); acc[ri].mh2   +=sq(em);
         acc[ri].pmh  +=fabs(ep); acc[ri].pmh2  +=sq(ep);
         acc[ri].oph  +=fabs(eo); acc[ri].oph2  +=sq(eo);
+        acc[ri].bd   +=fabs(eb); acc[ri].bd2   +=sq(eb);
         acc[ri].kmv  +=fabs(ev); acc[ri].kmv2  +=sq(ev);
         acc[ri].wpmh +=fabs(ew); acc[ri].wpmh2 +=sq(ew);
     }
@@ -415,9 +423,9 @@ int main(int argc, char* argv[])
     // ground truth: theo_jaccard(p,k) for each sketch's k; wPMH vs exact WJ
     fprintf(stderr,
         "\n=== Fixed-Length (L=%d bp, m=1024, %d pairs×%d rates) ===\n"
-        "        ──── k=32 ────  ─ k=20 ─  ───────────────────── k=21 ─────────────────────  ── wPMH ──\n"
-        "rate      HLL    SS     KSSD     MinHash  ProbMH  OnePerm    KMV     (vs exact WJ)\n"
-        "        [MAE]  [MAE]   [MAE]     [MAE]    [MAE]    [MAE]   [MAE]        [MAE]\n"
+        "        ──── k=32 ────  ─ k=20 ─  ───────────────────────── k=21 ─────────────────────────  ── wPMH ──\n"
+        "rate      HLL    SS     KSSD     MinHash  ProbMH  OnePerm    KMV   BinDash   (vs exact WJ)\n"
+        "        [MAE]  [MAE]   [MAE]     [MAE]    [MAE]    [MAE]   [MAE]   [MAE]       [MAE]\n"
         "───────  ──────────────────────────────────────────────────────────────────────────────────────\n",
         seq_length, pairs_per_rate, n_rates);
 
@@ -426,28 +434,28 @@ int main(int argc, char* argv[])
         double N = (double)pairs_per_rate;
         const RateAcc& a = acc[ri];
         fprintf(stderr,
-            "%.3f   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f     %7.4f\n",
+            "%.3f   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f  %7.4f    %7.4f\n",
             rates[ri],
             a.hll/N, a.ss/N, a.kd/N,
-            a.mh/N, a.pmh/N, a.oph/N, a.kmv/N,
+            a.mh/N, a.pmh/N, a.oph/N, a.kmv/N, a.bd/N,
             a.wpmh/N);
         g.hll+=a.hll; g.ss+=a.ss; g.kd+=a.kd;
-        g.mh+=a.mh;   g.pmh+=a.pmh; g.oph+=a.oph; g.kmv+=a.kmv;
+        g.mh+=a.mh;   g.pmh+=a.pmh; g.oph+=a.oph; g.kmv+=a.kmv; g.bd+=a.bd;
         g.wpmh+=a.wpmh;
         g.hll2+=a.hll2; g.ss2+=a.ss2; g.kd2+=a.kd2;
-        g.mh2+=a.mh2; g.pmh2+=a.pmh2; g.oph2+=a.oph2; g.kmv2+=a.kmv2;
+        g.mh2+=a.mh2; g.pmh2+=a.pmh2; g.oph2+=a.oph2; g.kmv2+=a.kmv2; g.bd2+=a.bd2;
         g.wpmh2+=a.wpmh2;
     }
     double T = (double)total_pairs;
     fprintf(stderr,
         "───────  ──────────────────────────────────────────────────────────────────────────────────────\n"
-        "MAE    %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f     %7.4f\n"
-        "RMSE   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f     %7.4f\n"
+        "MAE    %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f  %7.4f    %7.4f\n"
+        "RMSE   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f  %7.4f    %7.4f\n"
         "time: %.1f s\n",
         g.hll/T, g.ss/T, g.kd/T,
-        g.mh/T, g.pmh/T, g.oph/T, g.kmv/T, g.wpmh/T,
+        g.mh/T, g.pmh/T, g.oph/T, g.kmv/T, g.bd/T, g.wpmh/T,
         sqrt(g.hll2/T), sqrt(g.ss2/T), sqrt(g.kd2/T),
-        sqrt(g.mh2/T), sqrt(g.pmh2/T), sqrt(g.oph2/T), sqrt(g.kmv2/T), sqrt(g.wpmh2/T),
+        sqrt(g.mh2/T), sqrt(g.pmh2/T), sqrt(g.oph2/T), sqrt(g.kmv2/T), sqrt(g.bd2/T), sqrt(g.wpmh2/T),
         t1 - t0);
 
     if (mode == EVAL_FIXED_ONLY)
@@ -462,7 +470,7 @@ int main(int argc, char* argv[])
         double rate;
         int    len_a, len_b;
         double theo_j32, theo_j21, theo_j20;
-        double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j, kmv_j;
+        double hll_j, ss_j, kssd_j, mh_j, pmh_j, oph_j, kmv_j, bd_j;
         double tl1_j, tl2_j, tl4_j;
         double wpmh_j;   // weighted PMH estimate
         double gt_wj;    // exact weighted Jaccard
@@ -579,6 +587,10 @@ int main(int argc, char* argv[])
         kv1.update(seq_a.data(), La); kv2.update(seq_b.data(), Lb);
         double kmv_j = kv1.jaccard(kv2);
 
+        Sketch::BinDash bd1(16, 21, 16, 42), bd2(16, 21, 16, 42);
+        bd1.update(seq_a.data(), La); bd2.update(seq_b.data(), Lb);
+        double bd_j = bd1.jaccard(bd2);
+
         // Weighted PMH — fused entropy-weighted update (no extra allocation).
         double wpmh_j = 0.0;
         if (nwinA > 0 && nwinB > 0) {
@@ -602,6 +614,7 @@ int main(int argc, char* argv[])
         r.pmh_j    = pmh_j;
         r.oph_j    = oph_j;
         r.kmv_j    = kmv_j;
+        r.bd_j     = bd_j;
         r.tl1_j    = vtl1_j;
         r.tl2_j    = vtl2_j;
         r.tl4_j    = vtl4_j;
@@ -612,35 +625,35 @@ int main(int argc, char* argv[])
     double t3 = get_sec();
 
     // ── Variable-length summary table ─────────────────────────────────────
-    double v_hll=0,v_ss=0,v_kd=0,v_mh=0,v_pmh=0,v_oph=0,v_kmv=0,v_wpmh=0;
-    double v_hll2=0,v_ss2=0,v_kd2=0,v_mh2=0,v_pmh2=0,v_oph2=0,v_kmv2=0,v_wpmh2=0;
+    double v_hll=0,v_ss=0,v_kd=0,v_mh=0,v_pmh=0,v_oph=0,v_kmv=0,v_bd=0,v_wpmh=0;
+    double v_hll2=0,v_ss2=0,v_kd2=0,v_mh2=0,v_pmh2=0,v_oph2=0,v_kmv2=0,v_bd2=0,v_wpmh2=0;
     for (int i = 0; i < total_pairs; i++) {
         const VarPairResult& r = vr[i];
         auto sq = [](double x){ return x*x; };
         double eh=r.hll_j-r.theo_j32,  es=r.ss_j-r.theo_j32,  ek=r.kssd_j-r.theo_j20;
-        double em=r.mh_j-r.theo_j21,   ep=r.pmh_j-r.theo_j21, eo=r.oph_j-r.theo_j21;
+        double em=r.mh_j-r.theo_j21,   ep=r.pmh_j-r.theo_j21, eo=r.oph_j-r.theo_j21, eb=r.bd_j-r.theo_j21;
         double ev=r.kmv_j-r.theo_j21,  ew=r.wpmh_j-r.gt_wj;
         v_hll+=fabs(eh); v_ss+=fabs(es); v_kd+=fabs(ek);
         v_mh+=fabs(em);  v_pmh+=fabs(ep); v_oph+=fabs(eo);
-        v_kmv+=fabs(ev); v_wpmh+=fabs(ew);
+        v_kmv+=fabs(ev); v_bd+=fabs(eb); v_wpmh+=fabs(ew);
         v_hll2+=sq(eh); v_ss2+=sq(es); v_kd2+=sq(ek);
         v_mh2+=sq(em);  v_pmh2+=sq(ep); v_oph2+=sq(eo);
-        v_kmv2+=sq(ev); v_wpmh2+=sq(ew);
+        v_kmv2+=sq(ev); v_bd2+=sq(eb); v_wpmh2+=sq(ew);
     }
     double Nd = (double)total_pairs;
     fprintf(stderr,
         "\n=== Variable-Length ([50k–8M bp], m=1024, %d pairs×%d rates) ===\n"
-        "        ──── k=32 ────  ─ k=20 ─  ───────────────────── k=21 ─────────────────────  ── wPMH ──\n"
-        "          HLL    SS     KSSD     MinHash  ProbMH  OnePerm    KMV     (vs exact WJ)\n"
+        "        ──── k=32 ────  ─ k=20 ─  ───────────────────────── k=21 ─────────────────────────  ── wPMH ──\n"
+        "          HLL    SS     KSSD     MinHash  ProbMH  OnePerm    KMV   BinDash   (vs exact WJ)\n"
         "───────  ──────────────────────────────────────────────────────────────────────────────────────\n"
-        "MAE    %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f     %7.4f\n"
-        "RMSE   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f     %7.4f\n"
+        "MAE    %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f  %7.4f    %7.4f\n"
+        "RMSE   %6.4f %6.4f  %6.4f   %7.4f  %7.4f  %7.4f  %7.4f  %7.4f    %7.4f\n"
         "time: %.1f s\n",
         pairs_per_rate, n_rates,
         v_hll/Nd, v_ss/Nd, v_kd/Nd,
-        v_mh/Nd, v_pmh/Nd, v_oph/Nd, v_kmv/Nd, v_wpmh/Nd,
+        v_mh/Nd, v_pmh/Nd, v_oph/Nd, v_kmv/Nd, v_bd/Nd, v_wpmh/Nd,
         sqrt(v_hll2/Nd), sqrt(v_ss2/Nd), sqrt(v_kd2/Nd),
-        sqrt(v_mh2/Nd), sqrt(v_pmh2/Nd), sqrt(v_oph2/Nd), sqrt(v_kmv2/Nd), sqrt(v_wpmh2/Nd),
+        sqrt(v_mh2/Nd), sqrt(v_pmh2/Nd), sqrt(v_oph2/Nd), sqrt(v_kmv2/Nd), sqrt(v_bd2/Nd), sqrt(v_wpmh2/Nd),
         t3 - t2);
 
     }   // end §2

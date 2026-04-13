@@ -84,6 +84,8 @@ private:
     uint32_t buf_cap_;
 
     std::unique_ptr<uint64_t[]> vals_;
+    mutable std::unique_ptr<uint8_t[]> enc_buf_;
+    mutable uint64_t enc_cap_;
     mutable uint32_t size_;
     mutable uint64_t threshold_;
     mutable bool     sorted_;

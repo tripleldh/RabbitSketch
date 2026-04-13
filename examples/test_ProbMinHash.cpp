@@ -68,7 +68,7 @@ int main(int argc, char* argv[])
 
     double t0 = get_sec();
 
-    #pragma omp parallel num_threads(nThreads)
+    #pragma omp parallel num_threads(actualThreads)
     {
         int tid = omp_get_thread_num();
         auto& localIdx = threadIdx[tid];
