@@ -65,9 +65,20 @@ public:
     double jaccard(const BinDash& other) const;
     double jaccardPacked(const BinDash& other) const;
 
-    double distance(const BinDash& other) const {
-        return 1.0 - jaccard(other);
-    }
+    double distance(const BinDash& other) const;
+
+    /**
+     * Containment of *this in other: |A ∩ B| / |A|.
+     * Cardinality is estimated via one-permutation occupancy:
+     *   n ≈ -m * ln(1 - nonempty/m)
+     */
+    double containment(const BinDash& other) const;
+
+    /**
+     * Average Nucleotide Identity estimated from Jaccard similarity.
+     * ANI = (2J / (1+J))^(1/k) where k is the sketch k-mer size.
+     */
+    double ani(const BinDash& other) const;
 
     const uint64_t* getSignatures() const { return usigs_.data(); }
     uint32_t getNumWords()  const { return sketchsize64_ * bbits_; }
@@ -100,10 +111,12 @@ private:
     std::vector<uint64_t> signs_;   // [nbins_] per-bin minimum hash (temporary)
     std::vector<uint64_t> usigs_;   // [sketchsize64_*bbits_] bit-packed (final)
     mutable bool finalized_;
+    uint32_t raw_nonempty_;
 
     void ensureFinalized() const;
     void densify();
     void packBits();
+    double cardinalityEstimate() const;
 };
 
 } // namespace Sketch

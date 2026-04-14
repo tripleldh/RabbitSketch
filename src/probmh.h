@@ -156,11 +156,10 @@ public:
     double jaccard(const ProbMinHash4& other) const;
 
     /**
-     * Return probability Jaccard distance = 1 - jaccard().
+     * Return Mash distance from (probability) Jaccard:
+     *   D = -ln(2J/(1+J)) / kmer_size
      */
-    double distance(const ProbMinHash4& other) const {
-        return 1.0 - jaccard(other);
-    }
+    double distance(const ProbMinHash4& other) const;
 
     /**
      * Weighted containment of *this in other: weighted_intersection / weight_A.
@@ -279,9 +278,7 @@ public:
 
     double jaccard(const ProbMinHash4OP& other) const;
 
-    double distance(const ProbMinHash4OP& other) const {
-        return 1.0 - jaccard(other);
-    }
+    double distance(const ProbMinHash4OP& other) const;
 
     ProbMinHash4OP merge(const ProbMinHash4OP& other) const;
 

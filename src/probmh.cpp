@@ -1091,6 +1091,14 @@ double ProbMinHash4::jaccard(const ProbMinHash4& other) const {
     return static_cast<double>(count) / static_cast<double>(m_);
 }
 
+double ProbMinHash4::distance(const ProbMinHash4& other) const {
+    const double j = jaccard(other);
+    if (j <= 0.0) return std::numeric_limits<double>::infinity();
+    if (j >= 1.0) return 0.0;
+    const double ratio = 2.0 * j / (1.0 + j);
+    return -std::log(ratio) / static_cast<double>(kmer_size_);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // containment  –  weighted C(this ⊆ other)
 //   C_w(A⊆B) = J_w * (w_A + w_B) / (w_A * (1 + J_w))

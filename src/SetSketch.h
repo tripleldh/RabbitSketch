@@ -25,7 +25,7 @@ public:
   SetSketch merge(const SetSketch& other) const;
   double cardinality() const;
   double jaccard_index(const SetSketch& other) const;
-  double distance(const SetSketch& other) const { return 1.0 - jaccard_index(other); }
+  double distance(const SetSketch& other) const;
 
   /// Containment of *this in other: |A ∩ B| / |A|.
   ///   C(A⊆B) = (|A| + |B| - |AUB|) / |A|
@@ -33,8 +33,8 @@ public:
 
   /// Average Nucleotide Identity from Jaccard similarity.
   ///   ANI = (2J / (1+J))^(1/kmer_size)
-  /// @param kmer_size  k-mer length used during sketching (default 32).
-  double ani(const SetSketch& other, int kmer_size = 32) const;
+  double ani(const SetSketch& other) const;
+  double ani(const SetSketch& other, int /*kmer_size*/) const { return ani(other); }
   const std::vector<uint8_t>& getCore() const { return core_; }
   double equalRegisterFraction(const SetSketch& other) const;
   double distanceFiltered(const SetSketch& other,

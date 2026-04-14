@@ -39,9 +39,7 @@ public:
      */
     double jaccard(const FastKMV& other) const;
 
-    double distance(const FastKMV& other) const {
-        return 1.0 - jaccard(other);
-    }
+    double distance(const FastKMV& other) const;
 
     /**
      * KMV cardinality estimate: (k-1) * KEY_MAX / tau_k.

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <limits>
 
 using namespace Sketch;
 
@@ -202,6 +203,15 @@ double SetSketch::jaccard_index(const SetSketch& other) const {
   double c2 = other.cardinality();
   double inter = c1 + c2 - us;
   return (inter > 0.0) ? inter / us : 0.0;
+}
+
+double SetSketch::distance(const SetSketch& other) const {
+  const double j = jaccard_index(other);
+  if (j <= 0.0) return std::numeric_limits<double>::infinity();
+  if (j >= 1.0) return 0.0;
+  constexpr double kmer_size = 32.0;
+  const double ratio = 2.0 * j / (1.0 + j);
+  return -std::log(ratio) / kmer_size;
 }
 
 SetSketch SetSketch::merge(const SetSketch& other) const {
@@ -473,12 +483,13 @@ double SetSketch::containment(const SetSketch& other) const
 
 // ── ani ──────────────────────────────────────────────────────────────────────
 // ANI = (2J / (1+J))^(1/kmer_size)   (Mash / Ondov et al. 2016)
-double SetSketch::ani(const SetSketch& other, int kmer_size) const
+double SetSketch::ani(const SetSketch& other) const
 {
   const double j = jaccard_index(other);
   if (j <= 0.0) return 0.0;
   if (j >= 1.0) return 1.0;
-  return std::pow(2.0 * j / (1.0 + j), 1.0 / static_cast<double>(kmer_size));
+  constexpr double kmer_size = 32.0;
+  return std::pow(2.0 * j / (1.0 + j), 1.0 / kmer_size);
 }
 
 // ── inverted index: block key extraction ─────────────────────────────────────

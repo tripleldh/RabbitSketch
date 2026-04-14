@@ -328,6 +328,14 @@ double ProbMinHash4OP::jaccard(const ProbMinHash4OP& other) const {
     return static_cast<double>(count) / static_cast<double>(m_);
 }
 
+double ProbMinHash4OP::distance(const ProbMinHash4OP& other) const {
+    const double j = jaccard(other);
+    if (j <= 0.0) return std::numeric_limits<double>::infinity();
+    if (j >= 1.0) return 0.0;
+    const double ratio = 2.0 * j / (1.0 + j);
+    return -std::log(ratio) / static_cast<double>(kmer_size_);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // merge  –  element-wise min
 // ═══════════════════════════════════════════════════════════════════════════

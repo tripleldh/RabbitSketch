@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <cassert>
 #include <climits>
+#include <limits>
 #include <memory>
 
 using namespace Sketch;
@@ -650,6 +651,19 @@ double FastKMV::containment(const FastKMV& other) const {
     const double card_b = other.cardinality();
     // |AUB| = (cardA + cardB) / (1 + J)  =>  |A∩B| = J * |AUB|
     return j * (card_a + card_b) / (card_a * (1.0 + j));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// distance  –  Mash distance from Jaccard
+//   D = -ln(2J/(1+J)) / k   (Ondov et al. 2016)
+// ═══════════════════════════════════════════════════════════════════════════
+
+double FastKMV::distance(const FastKMV& other) const {
+    const double j = jaccard(other);
+    if (j <= 0.0) return std::numeric_limits<double>::infinity();
+    if (j >= 1.0) return 0.0;
+    const double ratio = 2.0 * j / (1.0 + j);
+    return -std::log(ratio) / static_cast<double>(kmer_size_);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -17,8 +17,10 @@
 #include <algorithm>
 #include <cassert>
 #include <climits>
+#include <cmath>
 #include <cstring>
 #include <immintrin.h>
+#include <limits>
 
 using namespace Sketch;
 
@@ -62,7 +64,8 @@ BinDash::BinDash(uint32_t sketchsize64, int kmer_size,
       nbins_(sketchsize64 * 64),
       signs_(sketchsize64 * 64, UINT64_MAX),
       usigs_(),
-      finalized_(false)
+      finalized_(false),
+      raw_nonempty_(0)
 {
     assert(sketchsize64 > 0);
     assert(kmer_size >= 1 && kmer_size <= 32);
@@ -106,8 +109,10 @@ void BinDash::update(const char* seq, uint64_t length) {
             uint64_t h = mc::murmur3_fmix(canonical, loc_seed);
             uint32_t binidx = static_cast<uint32_t>((h >> 32) % loc_nbins);
             uint64_t value  = mc::murmur3_fmix(h, 0ULL);
-            if (value < signs_[binidx])
+            if (value < signs_[binidx]) {
+                if (signs_[binidx] == UINT64_MAX) ++raw_nonempty_;
                 signs_[binidx] = value;
+            }
         }
 
         if (i < N_body) {
@@ -258,6 +263,40 @@ double BinDash::jaccardPacked(const BinDash& other) const {
 
 double BinDash::jaccard(const BinDash& other) const {
     return jaccardPacked(other);
+}
+
+double BinDash::cardinalityEstimate() const {
+    const double m = static_cast<double>(nbins_);
+    const double occupied = std::min(static_cast<double>(raw_nonempty_), m);
+    if (occupied <= 0.0) return 0.0;
+    if (occupied >= m) return std::numeric_limits<double>::infinity();
+    return -m * std::log1p(-occupied / m);
+}
+
+double BinDash::containment(const BinDash& other) const {
+    const double card_a = cardinalityEstimate();
+    if (card_a <= 0.0 || !std::isfinite(card_a)) return 0.0;
+    const double j = jaccard(other);
+    if (j <= 0.0) return 0.0;
+    const double card_b = other.cardinalityEstimate();
+    if (card_b <= 0.0) return 0.0;
+    return j * (card_a + card_b) / (card_a * (1.0 + j));
+}
+
+double BinDash::ani(const BinDash& other) const {
+    const double j = jaccard(other);
+    if (j <= 0.0) return 0.0;
+    if (j >= 1.0) return 1.0;
+    return std::pow(2.0 * j / (1.0 + j),
+                    1.0 / static_cast<double>(kmer_size_));
+}
+
+double BinDash::distance(const BinDash& other) const {
+    const double j = jaccard(other);
+    if (j <= 0.0) return std::numeric_limits<double>::infinity();
+    if (j >= 1.0) return 0.0;
+    const double ratio = 2.0 * j / (1.0 + j);
+    return -std::log(ratio) / static_cast<double>(kmer_size_);
 }
 
 #undef BD_ENC
