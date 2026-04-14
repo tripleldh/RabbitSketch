@@ -1,24 +1,17 @@
 /**
- * test_SetSketch – SetSketch all-to-all via block-of-3 inverted index.
+ * test_SetSketch – SetSketch all-to-all with direct pairwise verification.
  *
- * SetSketch registers are 8-bit (only 256 values), so individual registers
- * lack entropy for effective inverted-index filtering.  We group every 3
- * adjacent registers into a block and hash (block_idx, v1, v2, v3) into a
- * uint32_t key.  Random collision probability drops to ~(1/256)^3 ≈ 6e-8,
- * while similar genomes (J≈0.2) still share ~25 matching blocks on average.
- *
- * Candidates passing the block-match threshold are verified with exact
- * SetSketch Jaccard — zero accuracy loss.
+ * This path intentionally avoids inverted-index candidate pruning to prevent
+ * pair leakage. We directly run all-pairs SetSketch Jaccard and report Mash
+ * distance.
  *
  * Usage:
  *   exe_test_SetSketch <file_list> <dist_threshold> <threads> [output_file]
  */
 
 #include "Sketch.h"
-#include "InvertedIndex.h"
 #include "common.h"
 #include "kseq.h"
-#include "phmap.h"
 
 #include <zlib.h>
 #include <sys/time.h>
@@ -31,9 +24,11 @@
 #include <iostream>
 #include <cstring>
 #include <cmath>
-#include <climits>
 #include <cstdint>
+#include <algorithm>
+#include <numeric>
 #include <sys/stat.h>
+#include <unistd.h>
 
 using namespace std;
 
@@ -44,6 +39,17 @@ static inline double mash_distance_from_jaccard(double jaccard, int kmerSize) {
     if (jaccard >= 1.0) return 0.0;
     const double p = (2.0 * jaccard) / (1.0 + jaccard);
     return (p > 0.0) ? (-std::log(p) / static_cast<double>(kmerSize)) : 1.0;
+}
+
+static inline double min_jaccard_from_mash_distance(double mashDist, int kmerSize) {
+    if (mashDist <= 0.0) return 1.0;
+    const double p = std::exp(-mashDist * static_cast<double>(kmerSize));
+    const double denom = 2.0 - p;
+    if (denom <= 0.0) return 1.0;
+    double j = p / denom;
+    if (j < 0.0) return 0.0;
+    if (j > 1.0) return 1.0;
+    return j;
 }
 
 int main(int argc, char* argv[])
@@ -57,7 +63,8 @@ int main(int argc, char* argv[])
     const double thres     = stod(argv[2]);
     int          nThreads  = stoi(argv[3]);
     if (nThreads < 1) nThreads = 1;
-    const string outPath = (argc >= 5) ? argv[4] : "res.dist.SetSketch";
+    string outPath = "res.dist.SetSketch";
+    if (argc >= 5) outPath = argv[4];
 
     ifstream fs(inputFile);
     if (!fs) err(errno, "cannot open %s", inputFile.c_str());
@@ -77,8 +84,6 @@ int main(int argc, char* argv[])
 
     vector<double>   sizes(N, 0.0);
     vector<uint8_t>  flat_cores((size_t)N * m, 0);
-    const int NUM_BLOCKS = Sketch::SetSketch::numBlocks(m);
-    vector<uint32_t> flat_keys((size_t)N * NUM_BLOCKS, 0);
 
     // ── Phase 1a: parallel sketch construction ───────────────────────────────
     double t0 = get_sec();
@@ -90,7 +95,7 @@ int main(int argc, char* argv[])
         if (!fp) continue;
         kseq_t* ks = kseq_init(fp);
         while (kseq_read(ks) >= 0)
-            sk.update(ks->seq.s);
+            sk.update(ks->seq.s, static_cast<size_t>(ks->seq.l));
         kseq_destroy(ks);
         gzclose(fp);
 
@@ -100,49 +105,31 @@ int main(int argc, char* argv[])
 
     double t1 = get_sec();
     cerr << "sketch time: " << t1 - t0 << " s" << endl;
-    double t2 = t1;
     cerr << "flatten + free sketches: skipped (direct build into flat_cores)" << endl;
 
-    // ── Phase 1c: build local inverted index with block-of-3 keys ────────────
-
-    const int actualThreads = min(nThreads, N);
-    vector<phmap::flat_hash_map<uint32_t, vector<uint32_t>>> threadIdx(actualThreads);
-
-    #pragma omp parallel num_threads(actualThreads)
-    {
-        int tid = omp_get_thread_num();
-        auto& localIdx = threadIdx[tid];
-
-        #pragma omp for schedule(static)
-        for (int t = 0; t < N; t++) {
-            const uint8_t* core = &flat_cores[(size_t)t * m];
-            uint32_t* keys_t = &flat_keys[(size_t)t * NUM_BLOCKS];
-            for (int b = 0; b < NUM_BLOCKS; b++) {
-                uint32_t key = Sketch::SetSketch::blockHash(
-                    static_cast<uint32_t>(b),
-                    core[b * 3], core[b * 3 + 1], core[b * 3 + 2]);
-                keys_t[b] = key;
-                localIdx[key].push_back(static_cast<uint32_t>(t));
-            }
-        }
-    }
-
-    double t3 = get_sec();
-    cerr << "local inverted index: " << t3 - t2 << " s" << endl;
-
-    // ── Phase 2: Build CSR inverted index ────────────────────────────────────
-    auto csrIdx = Sketch::buildCSRIndex<uint32_t>(threadIdx, nThreads);
-    double t4 = get_sec();
-    cerr << "build CSR index: " << t4 - t3 << " s" << endl;
-
-    // ── Phase 3: distance with exact verification ────────────────────────────
-    // Keep legacy (1-Jaccard style) pruning for speed/stability.
-    // We only switch final reported distance to Mash distance.
     const int KMER_SIZE = 32;
-    const int minMatchBlocks = Sketch::SetSketch::minMatchBlocksForDist(thres, NUM_BLOCKS);
-    cerr << "pruning: minMatchBlocks=" << minMatchBlocks << "/" << NUM_BLOCKS
-         << "  (legacy minJac=" << (1.0 - thres)
-         << ", maxMashDist=" << thres << ")" << endl;
+    const double minJac = min_jaccard_from_mash_distance(thres, KMER_SIZE);
+    const int TILE = 128;
+
+    // Sort by cardinality desc to maximize size-ratio pruning and enable early-break.
+    vector<int> order(N);
+    iota(order.begin(), order.end(), 0);
+    sort(order.begin(), order.end(), [&](int a, int b) { return sizes[a] > sizes[b]; });
+    vector<string> sortedFiles(N);
+    vector<double> sortedSizes(N, 0.0);
+    vector<uint8_t> sortedCores((size_t)N * m, 0);
+    for (int ni = 0; ni < N; ++ni) {
+        const int oi = order[ni];
+        sortedFiles[ni] = fileList[oi];
+        sortedSizes[ni] = sizes[oi];
+        memcpy(&sortedCores[(size_t)ni * m], &flat_cores[(size_t)oi * m], m);
+    }
+    fileList.swap(sortedFiles);
+    sizes.swap(sortedSizes);
+    flat_cores.swap(sortedCores);
+
+    cerr << "mode: DIRECT all-pairs (no inverted index pruning)\n";
+    cerr << "pruning: minJac(from mashDist<" << thres << ") = " << minJac << "\n";
 
     // Handle output path (directory detection)
     string finalPath = outPath;
@@ -153,92 +140,108 @@ int main(int argc, char* argv[])
             finalPath += "res.dist.SetSketch";
         }
     }
-    FILE* fout = fopen(finalPath.c_str(), "w");
+    FILE* fout = fopen(finalPath.c_str(), "wb");
     if (!fout) {
         cerr << "ERROR: cannot open output file: " << finalPath << endl;
         return 1;
     }
     setvbuf(fout, nullptr, _IOFBF, 1 << 24);
     cerr << "output: " << finalPath << endl;
+    fclose(fout);
 
-    const uint32_t* csrPtr = csrIdx.csrPosts.data();
     int progress = N / 20;
     if (progress < 1) progress = 1;
 
     double t5 = get_sec();
+    const int nTiles = (N + TILE - 1) / TILE;
+    vector<string> partPaths(nThreads);
+    const int pid = static_cast<int>(getpid());
+    for (int tid = 0; tid < nThreads; ++tid)
+        partPaths[tid] = finalPath + ".part." + to_string(pid) + "." + to_string(tid);
 
     #pragma omp parallel num_threads(nThreads)
     {
-        vector<uint16_t> isect(N, 0);
-        vector<int> stamp(N, 0);
-        int ep = 0;
-        vector<int> cand;
-        cand.reserve(4096);
-        string buf;
-        buf.reserve(1 << 24);
+        const int tid = omp_get_thread_num();
+        FILE* tf = fopen(partPaths[tid].c_str(), "wb");
+        if (!tf) {
+            #pragma omp critical
+            cerr << "ERROR: cannot open temp output file: " << partPaths[tid] << "\n";
+        } else {
+            setvbuf(tf, nullptr, _IOFBF, 1 << 22);
+            string buf;
+            buf.reserve(1 << 22);
 
-        #pragma omp for schedule(dynamic, 64)
-        for (int i = 0; i < N; i++) {
-            cand.clear();
-            ++ep;
-            if (__builtin_expect(ep == INT_MAX, 0)) {
-                memset(stamp.data(), 0, N * sizeof(int));
-                ep = 1;
-            }
+            #pragma omp for schedule(dynamic, 1)
+            for (int tileI = 0; tileI < nTiles; ++tileI) {
+                const int iBeg = tileI * TILE;
+                const int iEnd = min(N, iBeg + TILE);
+                for (int tileJ = tileI; tileJ < nTiles; ++tileJ) {
+                    const int jBeg = tileJ * TILE;
+                    const int jEnd = min(N, jBeg + TILE);
 
-            const uint8_t* core_i = &flat_cores[(size_t)i * m];
-            const uint32_t* keys_i = &flat_keys[(size_t)i * NUM_BLOCKS];
-            for (int b = 0; b < NUM_BLOCKS; b++) {
-                uint32_t key = keys_i[b];
+                    for (int i = iBeg; i < iEnd; ++i) {
+                        int jStart = (tileI == tileJ) ? max(i + 1, jBeg) : jBeg;
+                        if (jStart >= jEnd) continue;
 
-                auto it = csrIdx.postIdx.find(key);
-                if (__builtin_expect(it == csrIdx.postIdx.end(), 0)) continue;
+                        const uint8_t* core_i = &flat_cores[(size_t)i * m];
+                        const double si = sizes[i];
 
-                const uint32_t* pl   = csrPtr + it->second.off;
-                const uint32_t  plSz = it->second.cnt;
-                for (uint32_t pi = 0; pi < plSz; pi++) {
-                    int j = static_cast<int>(pl[pi]);
-                    if (j <= i) continue;
-                    if (__builtin_expect(stamp[j] != ep, 1)) {
-                        stamp[j] = ep;
-                        isect[j] = 1;
-                        cand.push_back(j);
-                    } else {
-                        isect[j]++;
+                        // sizes sorted desc: in each i-loop, maxJacBySize decreases as j grows.
+                        for (int j = jStart; j < jEnd; ++j) {
+                            const double sj = sizes[j];
+                            const double maxJacBySize = (si > 0.0) ? (sj / si) : 0.0;
+                            if (maxJacBySize < minJac) {
+                                break;
+                            }
+                            const uint8_t* c2 = &flat_cores[(size_t)j * m];
+                            double jaccard = Sketch::SetSketch::jaccardFromCoresEarlyAbort(
+                                core_i, c2, m, bip, factor, si, sj, minJac);
+                            if (jaccard < minJac) continue;
+                            double dist = mash_distance_from_jaccard(jaccard, KMER_SIZE);
+
+                            if (dist < thres) {
+                                char line[1024];
+                                int len = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
+                                                   fileList[i].c_str(), fileList[j].c_str(), dist);
+                                buf.append(line, static_cast<size_t>(len));
+                            }
+
+                            if (buf.size() > (1 << 22)) {
+                                fwrite(buf.data(), 1, buf.size(), tf);
+                                buf.clear();
+                            }
+                        }
+
                     }
                 }
-            }
-
-            // Verify candidates with exact SetSketch Jaccard
-            const double si = sizes[i];
-            for (int j : cand) {
-                if (isect[j] < minMatchBlocks) continue;
-
-                const uint8_t* c2 = &flat_cores[(size_t)j * m];
-                double jaccard = Sketch::SetSketch::jaccardFromCores(
-                    core_i, c2, m, bip, factor, si, sizes[j]);
-                double dist = mash_distance_from_jaccard(jaccard, KMER_SIZE);
-
-                if (dist < thres) {
-                    char line[1024];
-                    int len = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
-                                       fileList[i].c_str(), fileList[j].c_str(), dist);
-                    buf.append(line, static_cast<size_t>(len));
+                const int iProgress = min(iEnd, N);
+                if (iProgress % progress == 0) {
+                    #pragma omp critical
+                    cerr << "  dist " << iProgress << " / " << N << "\n";
                 }
             }
+            if (!buf.empty()) fwrite(buf.data(), 1, buf.size(), tf);
+            fclose(tf);
+        }
+    }
 
-            if (buf.size() > (1 << 24)) {
-                #pragma omp critical
-                { fwrite(buf.data(), 1, buf.size(), fout); }
-                buf.clear();
-            }
-            if (i % progress == 0)
-                cerr << "  dist " << i << " / " << N << "\n";
+    fout = fopen(finalPath.c_str(), "wb");
+    if (!fout) {
+        cerr << "ERROR: cannot open output file for merge: " << finalPath << endl;
+        return 1;
+    }
+    setvbuf(fout, nullptr, _IOFBF, 1 << 24);
+    vector<char> copyBuf(1 << 20);
+    for (int tid = 0; tid < nThreads; ++tid) {
+        FILE* part = fopen(partPaths[tid].c_str(), "rb");
+        if (!part) continue;
+        while (true) {
+            size_t got = fread(copyBuf.data(), 1, copyBuf.size(), part);
+            if (got == 0) break;
+            fwrite(copyBuf.data(), 1, got, fout);
         }
-        if (!buf.empty()) {
-            #pragma omp critical
-            { fwrite(buf.data(), 1, buf.size(), fout); }
-        }
+        fclose(part);
+        remove(partPaths[tid].c_str());
     }
     fclose(fout);
 

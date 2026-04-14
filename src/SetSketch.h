@@ -22,6 +22,7 @@ public:
   ~SetSketch() = default;
 
   void update(char* seq);
+  void update(char* seq, size_t len);
   SetSketch merge(const SetSketch& other) const;
   double cardinality() const;
   double jaccard_index(const SetSketch& other) const;
@@ -91,6 +92,9 @@ public:
   static double jaccardFromCores(const uint8_t* c1, const uint8_t* c2, int m,
                                  const double* baseInvPow, double factor,
                                  double card1, double card2);
+  static double jaccardFromCoresEarlyAbort(const uint8_t* c1, const uint8_t* c2, int m,
+                                           const double* baseInvPow, double factor,
+                                           double card1, double card2, double minJaccard);
 
 private:
   void add_slow(uint64_t hashval);

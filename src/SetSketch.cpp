@@ -43,6 +43,64 @@ static int setsketch_count_equal_regs(const uint8_t* __restrict__ a,
     count += (int)(a[i] == b[i]);
   return count;
 }
+
+static inline double setsketch_sum_max_registers(const uint8_t* __restrict__ c1,
+                                                 const uint8_t* __restrict__ c2,
+                                                 int m,
+                                                 const double* __restrict__ baseInvPow) {
+  double sum = 0.0;
+  int i = 0;
+#if defined(__AVX512BW__) && defined(__AVX512F__)
+  __m512d vsum0 = _mm512_setzero_pd();
+  __m512d vsum1 = _mm512_setzero_pd();
+  for (; i + 16 <= m; i += 16) {
+    __m128i va = _mm_loadu_si128((const __m128i*)(c1 + i));
+    __m128i vb = _mm_loadu_si128((const __m128i*)(c2 + i));
+    __m128i vmax = _mm_max_epu8(va, vb);
+    __m256i vidx0 = _mm256_cvtepu8_epi32(vmax);
+    __m128i vmax_hi = _mm_srli_si128(vmax, 8);
+    __m256i vidx1 = _mm256_cvtepu8_epi32(vmax_hi);
+    vsum0 = _mm512_add_pd(vsum0, _mm512_i32gather_pd(vidx0, baseInvPow, 8));
+    vsum1 = _mm512_add_pd(vsum1, _mm512_i32gather_pd(vidx1, baseInvPow, 8));
+  }
+  sum += _mm512_reduce_add_pd(_mm512_add_pd(vsum0, vsum1));
+#elif defined(__AVX2__)
+  __m256d vacc0 = _mm256_setzero_pd();
+  __m256d vacc1 = _mm256_setzero_pd();
+  __m256d vacc2 = _mm256_setzero_pd();
+  __m256d vacc3 = _mm256_setzero_pd();
+  for (; i + 16 <= m; i += 16) {
+    __m128i va = _mm_loadu_si128((const __m128i*)(c1 + i));
+    __m128i vb = _mm_loadu_si128((const __m128i*)(c2 + i));
+    __m128i vmax = _mm_max_epu8(va, vb);
+
+    __m128i idx0_8 = vmax;
+    __m128i idx1_8 = _mm_srli_si128(vmax, 8);
+    __m256i idx0_32 = _mm256_cvtepu8_epi32(idx0_8);
+    __m256i idx1_32 = _mm256_cvtepu8_epi32(idx1_8);
+    __m128i idx0_lo = _mm256_castsi256_si128(idx0_32);
+    __m128i idx0_hi = _mm256_extracti128_si256(idx0_32, 1);
+    __m128i idx1_lo = _mm256_castsi256_si128(idx1_32);
+    __m128i idx1_hi = _mm256_extracti128_si256(idx1_32, 1);
+
+    vacc0 = _mm256_add_pd(vacc0, _mm256_i32gather_pd(baseInvPow, idx0_lo, 8));
+    vacc1 = _mm256_add_pd(vacc1, _mm256_i32gather_pd(baseInvPow, idx0_hi, 8));
+    vacc2 = _mm256_add_pd(vacc2, _mm256_i32gather_pd(baseInvPow, idx1_lo, 8));
+    vacc3 = _mm256_add_pd(vacc3, _mm256_i32gather_pd(baseInvPow, idx1_hi, 8));
+  }
+  __m256d vacc01 = _mm256_add_pd(vacc0, vacc1);
+  __m256d vacc23 = _mm256_add_pd(vacc2, vacc3);
+  __m256d vacc = _mm256_add_pd(vacc01, vacc23);
+  alignas(32) double buf[4];
+  _mm256_store_pd(buf, vacc);
+  sum += buf[0] + buf[1] + buf[2] + buf[3];
+#endif
+  for (; i < m; i++) {
+    uint8_t r = (c1[i] > c2[i]) ? c1[i] : c2[i];
+    sum += baseInvPow[r];
+  }
+  return sum;
+}
 } // namespace
 
 // ── Constructor: precompute threshold + base_inv_pow tables ───────────────────
@@ -153,44 +211,11 @@ double SetSketch::cardinality() const {
 
 // ── union_size: inline max + SIMD gather, no allocation ───────────────────────
 double SetSketch::union_size(const SetSketch& other) const {
-  const size_t sz = core_.size();
+  const int sz = static_cast<int>(core_.size());
   const double* __restrict__ tbl = base_inv_pow_;
   const uint8_t* __restrict__ c1 = core_.data();
   const uint8_t* __restrict__ c2 = other.core_.data();
-  double sum = 0.0;
-
-#if defined(__AVX512BW__) && defined(__AVX512F__)
-  size_t i = 0;
-  __m512d vsum0 = _mm512_setzero_pd();
-  __m512d vsum1 = _mm512_setzero_pd();
-  for (; i + 16 <= sz; i += 16) {
-    // Max of 16 uint8 pairs using AVX-512BW, then split into 2×8 gathers
-    __m128i va0 = _mm_loadu_si128((__m128i*)(c1 + i));
-    __m128i vb0 = _mm_loadu_si128((__m128i*)(c2 + i));
-    __m128i vmax = _mm_max_epu8(va0, vb0);
-
-    // First 8 bytes
-    __m256i vidx0 = _mm256_cvtepu8_epi32(vmax);
-    __m512d vals0 = _mm512_i32gather_pd(vidx0, tbl, 8);
-    vsum0 = _mm512_add_pd(vsum0, vals0);
-
-    // Next 8 bytes: shift right by 8
-    __m128i vmax_hi = _mm_srli_si128(vmax, 8);
-    __m256i vidx1 = _mm256_cvtepu8_epi32(vmax_hi);
-    __m512d vals1 = _mm512_i32gather_pd(vidx1, tbl, 8);
-    vsum1 = _mm512_add_pd(vsum1, vals1);
-  }
-  sum = _mm512_reduce_add_pd(_mm512_add_pd(vsum0, vsum1));
-  for (; i < sz; i++) {
-    uint8_t r = (c1[i] > c2[i]) ? c1[i] : c2[i];
-    sum += tbl[r];
-  }
-#else
-  for (size_t i = 0; i < sz; i++) {
-    uint8_t r = (c1[i] > c2[i]) ? c1[i] : c2[i];
-    sum += tbl[r];
-  }
-#endif
+  const double sum = setsketch_sum_max_registers(c1, c2, sz, tbl);
 
   return (sum > 1e-300) ? factor_ / sum : 0.0;
 }
@@ -260,7 +285,11 @@ static const uint8_t ENCODE_LUT[256] = {
 #define VALID(e) ((e) <= 3)
 
 void SetSketch::update(char* seq) {
-  const uint64_t LENGTH = strlen(seq);
+  update(seq, strlen(seq));
+}
+
+void SetSketch::update(char* seq, size_t len) {
+  const uint64_t LENGTH = static_cast<uint64_t>(len);
   const int KMERLEN = 32;
   if (LENGTH < (uint64_t)KMERLEN) return;
 
@@ -479,30 +508,41 @@ double SetSketch::jaccardFromCores(
     double factor,
     double card1, double card2)
 {
-    double sum = 0.0;
-    int i = 0;
-#if defined(__AVX512BW__) && defined(__AVX512F__)
-    __m512d vsum0 = _mm512_setzero_pd();
-    __m512d vsum1 = _mm512_setzero_pd();
-    for (; i + 16 <= m; i += 16) {
-        __m128i va   = _mm_loadu_si128((__m128i*)(c1 + i));
-        __m128i vb   = _mm_loadu_si128((__m128i*)(c2 + i));
-        __m128i vmax = _mm_max_epu8(va, vb);
-        __m256i vidx0 = _mm256_cvtepu8_epi32(vmax);
-        vsum0 = _mm512_add_pd(vsum0, _mm512_i32gather_pd(vidx0, baseInvPow, 8));
-        __m128i vmax_hi = _mm_srli_si128(vmax, 8);
-        __m256i vidx1 = _mm256_cvtepu8_epi32(vmax_hi);
-        vsum1 = _mm512_add_pd(vsum1, _mm512_i32gather_pd(vidx1, baseInvPow, 8));
-    }
-    sum = _mm512_reduce_add_pd(_mm512_add_pd(vsum0, vsum1));
-#endif
-    for (; i < m; i++) {
-        uint8_t r = (c1[i] > c2[i]) ? c1[i] : c2[i];
-        sum += baseInvPow[r];
-    }
+    const double sum = setsketch_sum_max_registers(c1, c2, m, baseInvPow);
     if (sum <= 1e-300) return 0.0;
     double us    = factor / sum;
     double inter = card1 + card2 - us;
+    return (inter > 0.0) ? inter / us : 0.0;
+}
+
+double SetSketch::jaccardFromCoresEarlyAbort(
+    const uint8_t* __restrict__ c1,
+    const uint8_t* __restrict__ c2,
+    int m,
+    const double* __restrict__ baseInvPow,
+    double factor,
+    double card1, double card2,
+    double minJaccard)
+{
+    if (m <= 0) return 0.0;
+    if (minJaccard <= 0.0) {
+        return jaccardFromCores(c1, c2, m, baseInvPow, factor, card1, card2);
+    }
+    const double cardSum = card1 + card2;
+    const double maxTerm = baseInvPow[0];
+    double sum = 0.0;
+    for (int i = 0; i < m; ++i) {
+        uint8_t r = (c1[i] > c2[i]) ? c1[i] : c2[i];
+        sum += baseInvPow[r];
+
+        const int remain = m - i - 1;
+        const double maxPossibleSum = sum + maxTerm * static_cast<double>(remain);
+        const double maxPossibleJ = (cardSum * maxPossibleSum / factor) - 1.0;
+        if (maxPossibleJ < minJaccard) return -1.0;
+    }
+    if (sum <= 1e-300) return 0.0;
+    const double us = factor / sum;
+    const double inter = cardSum - us;
     return (inter > 0.0) ? inter / us : 0.0;
 }
 
