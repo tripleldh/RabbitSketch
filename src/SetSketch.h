@@ -37,6 +37,7 @@ public:
   /// @param kmer_size  k-mer length used during sketching (default 32).
   double ani(const SetSketch& other, int kmer_size = 32) const;
   const std::vector<uint8_t>& getCore() const { return core_; }
+  const std::vector<uint64_t>& getWitnesses() const { return witnesses_; }
   double equalRegisterFraction(const SetSketch& other) const;
   double distanceFiltered(const SetSketch& other,
                           double min_jaccard,
@@ -96,6 +97,24 @@ public:
                                            const double* baseInvPow, double factor,
                                            double card1, double card2, double minJaccard);
 
+  /**
+   * SIMD-batched Jaccard with early abort using precomputed suffix sums.
+   * Processes registers in SIMD chunks of @p tailStep, checking a tight
+   * upper bound at each checkpoint.  Mathematically exact: never misses
+   * a pair above threshold.
+   *
+   * @param tailSum1  Suffix sums for c1, length (m/tailStep + 1).
+   *                  tailSum1[cp] = Σ_{k≥cp*tailStep} baseInvPow[c1[k]].
+   * @param tailSum2  Same for c2.
+   * @param tailStep  Registers per SIMD chunk (multiple of 16, must divide m).
+   */
+  static double jaccardFromCoresBatch(
+      const uint8_t* c1, const uint8_t* c2, int m,
+      const double* baseInvPow, double factor,
+      double card1, double card2, double minJaccard,
+      const double* tailSum1, const double* tailSum2,
+      int tailStep);
+
 private:
   void add_slow(uint64_t hashval);
   void recompute_min();
@@ -103,6 +122,7 @@ private:
   void ensure_cardinality() const;
 
   std::vector<uint8_t> core_;
+  std::vector<uint64_t> witnesses_;  // hash that "won" each register
   uint32_t np_;
   uint32_t q_;
   double base_;

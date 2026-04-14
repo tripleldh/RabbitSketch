@@ -286,6 +286,136 @@ void computeDistances(
     fclose(fout);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3 (exact variant): posting-list candidate generation + caller-provided
+// exact pairwise verification.
+//
+// Same posting-list traversal as computeDistances(), but instead of deriving
+// Jaccard from the common-key count, delegates to an ExactJaccardFn that
+// receives the two sketch indices and returns the true Jaccard (or negative
+// to reject).  Ideal for SetSketch, where Jaccard must be computed from the
+// register arrays rather than estimated from shared key counts.
+//
+// ExactJaccardFn:  double fn(int i, int j) → exact Jaccard, or < 0 to skip
+// MinCommonFn:     int fn(int key_count_i) → minimum common keys to verify
+// ─────────────────────────────────────────────────────────────────────────────
+template<typename KeyT, typename ExactJaccardFn, typename MinCommonFn>
+void computeDistancesExact(
+    const InvertedIndex<KeyT>&              idx,
+    const std::vector<std::vector<KeyT>>&   skKeys,
+    const std::vector<std::string>&         fileList,
+    int                                     N,
+    int                                     kmerSize,
+    double                                  maxDist,
+    ExactJaccardFn                          exactJaccardFn,
+    MinCommonFn                             minCommonFn,
+    const std::string&                      outputPath,
+    int                                     nThreads)
+{
+    const bool useMashDist = (kmerSize > 0);
+    const uint32_t* csrPtr = idx.csrPosts.data();
+
+    std::string finalPath = outputPath;
+    struct stat st;
+    if (stat(finalPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+        if (finalPath.back() != '/') finalPath += '/';
+        finalPath += "res.dist";
+    }
+
+    FILE* fout = fopen(finalPath.c_str(), "w");
+    if (!fout) {
+        std::cerr << "ERROR: cannot open output file: " << finalPath << std::endl;
+        return;
+    }
+    setvbuf(fout, nullptr, _IOFBF, 1 << 24);
+    std::cerr << "output: " << finalPath << std::endl;
+
+    int progress = N / 20;
+    if (progress < 1) progress = 1;
+
+    #pragma omp parallel num_threads(nThreads)
+    {
+        std::vector<int> isect(N, 0);
+        std::vector<int> stamp(N, 0);
+        int ep = 0;
+        std::vector<int> cand;
+        cand.reserve(4096);
+        std::string buf;
+        buf.reserve(1 << 24);
+
+        #pragma omp for schedule(dynamic, 64)
+        for (int i = 0; i < N; i++) {
+            const int nk = static_cast<int>(skKeys[i].size());
+            if (__builtin_expect(nk == 0, 0)) continue;
+
+            const int minCommon = minCommonFn(nk);
+
+            cand.clear();
+            ++ep;
+            if (__builtin_expect(ep == INT_MAX, 0)) {
+                std::memset(stamp.data(), 0, N * sizeof(int));
+                ep = 1;
+            }
+
+            const auto& keys = skKeys[i];
+            const size_t ksz = keys.size();
+            for (size_t ki = 0; ki < ksz; ki++) {
+                if (__builtin_expect(ki + 1 < ksz, 1))
+                    __builtin_prefetch(&keys[ki + 1], 0, 1);
+                auto it = idx.postIdx.find(keys[ki]);
+                if (__builtin_expect(it == idx.postIdx.end(), 0)) continue;
+                const uint32_t* pl   = csrPtr + it->second.off;
+                const uint32_t  plSz = it->second.cnt;
+                for (uint32_t pi = 0; pi < plSz; pi++) {
+                    int j = static_cast<int>(pl[pi]);
+                    if (j <= i) continue;
+                    if (__builtin_expect(stamp[j] != ep, 1)) {
+                        stamp[j] = ep;
+                        isect[j] = 1;
+                        cand.push_back(j);
+                    } else {
+                        isect[j]++;
+                    }
+                }
+            }
+
+            for (int j : cand) {
+                if (isect[j] < minCommon) continue;
+
+                double jac = exactJaccardFn(i, j);
+                if (jac < 0.0) continue;
+                if (jac > 1.0) jac = 1.0;
+
+                double dist = 1.0 - jac;
+                if (useMashDist) {
+                    dist = (jac >= 1.0) ? 0.0
+                        : -std::log(2.0 * jac / (1.0 + jac))
+                          / static_cast<double>(kmerSize);
+                }
+                if (dist < maxDist) {
+                    char line[1024];
+                    int n = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
+                        fileList[i].c_str(), fileList[j].c_str(), dist);
+                    buf.append(line, static_cast<size_t>(n));
+                }
+            }
+
+            if (buf.size() > (1 << 24)) {
+                #pragma omp critical
+                { fwrite(buf.data(), 1, buf.size(), fout); }
+                buf.clear();
+            }
+            if (i % progress == 0)
+                std::cerr << "  dist " << i << " / " << N << "\n";
+        }
+        if (!buf.empty()) {
+            #pragma omp critical
+            { fwrite(buf.data(), 1, buf.size(), fout); }
+        }
+    }
+    fclose(fout);
+}
+
 } // namespace Sketch
 
 #endif // _INVERTED_INDEX_H_

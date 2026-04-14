@@ -113,6 +113,7 @@ SetSketch::SetSketch(int np, double base, double a)
 
   const uint64_t m = 1ULL << np;
   core_.resize(m, 0);
+  witnesses_.resize(m, 0);
   shift_ = 64 - np;
   mask_u_ = (shift_ >= 64) ? ~0ULL : (1ULL << shift_) - 1;
 
@@ -162,6 +163,7 @@ void SetSketch::add_slow(uint64_t hashval) {
   uint8_t k = cur + 1;
   while (k < q_ && rest >= thresholds_[k]) ++k;
   core_[index] = k;
+  witnesses_[index] = hashval;
   is_calculated_ = 0;
 
   if (cur == min_reg_) {
@@ -298,6 +300,7 @@ void SetSketch::update(char* seq, size_t len) {
   const uint64_t mask = mask_u_;
   const uint32_t qmax = q_;
   uint8_t*       core = core_.data();
+  uint64_t*      wit  = witnesses_.data();
   const uint64_t* thresh = thresholds_;
   uint8_t  loc_min_reg     = min_reg_;
   uint32_t loc_count_at_min = count_at_min_;
@@ -388,6 +391,7 @@ void SetSketch::update(char* seq, size_t len) {
           while (k < qmax && rest >= thresh[k]) ++k;
 
           core[idx] = k;
+          wit[idx] = hashvalv[j];
           loc_is_calc = 0;
 
           // Update global lower-bound tracking
@@ -412,6 +416,7 @@ void SetSketch::update(char* seq, size_t len) {
       uint8_t k = cur + 1;
       while (k < qmax && rest >= thresh[k]) ++k;
       core[idx] = k;
+      wit[idx] = hashvalv[j];
       loc_is_calc = 0;
 
       if (cur == loc_min_reg) {
@@ -435,6 +440,7 @@ void SetSketch::update(char* seq, size_t len) {
           uint8_t k = cur + 1;
           while (k < qmax && rest >= thresh[k]) ++k;
           core[idx] = k;
+          wit[idx] = hashval;
           loc_is_calc = 0;
           if (cur == loc_min_reg) {
             if (!loc_min_dirty && loc_count_at_min > 0 && --loc_count_at_min == 0)
@@ -543,6 +549,44 @@ double SetSketch::jaccardFromCoresEarlyAbort(
     if (sum <= 1e-300) return 0.0;
     const double us = factor / sum;
     const double inter = cardSum - us;
+    return (inter > 0.0) ? inter / us : 0.0;
+}
+
+double SetSketch::jaccardFromCoresBatch(
+    const uint8_t* __restrict__ c1,
+    const uint8_t* __restrict__ c2,
+    int m,
+    const double* __restrict__ baseInvPow,
+    double factor,
+    double card1, double card2,
+    double minJaccard,
+    const double* __restrict__ tailSum1,
+    const double* __restrict__ tailSum2,
+    int tailStep)
+{
+    if (m <= 0) return 0.0;
+    if (minJaccard <= 0.0)
+        return jaccardFromCores(c1, c2, m, baseInvPow, factor, card1, card2);
+
+    const double cardSum = card1 + card2;
+    const double targetSum = (1.0 + minJaccard) * factor / cardSum;
+    double sum = 0.0;
+    int i = 0, cp = 0;
+
+    for (; i + tailStep <= m; i += tailStep, ++cp) {
+        sum += setsketch_sum_max_registers(c1 + i, c2 + i, tailStep, baseInvPow);
+        double tail = tailSum1[cp + 1];
+        double t2   = tailSum2[cp + 1];
+        if (t2 < tail) tail = t2;
+        if (sum + tail < targetSum) return -1.0;
+    }
+    for (; i < m; ++i) {
+        uint8_t r = (c1[i] > c2[i]) ? c1[i] : c2[i];
+        sum += baseInvPow[r];
+    }
+    if (sum <= 1e-300) return 0.0;
+    double us = factor / sum;
+    double inter = cardSum - us;
     return (inter > 0.0) ? inter / us : 0.0;
 }
 
