@@ -11,7 +11,7 @@
  * SetSketch Jaccard — zero accuracy loss.
  *
  * Usage:
- *   exe_test_SetSketch <file_list> <dist_threshold> <threads> [output_file]
+ *   exe_test_SetSketch <file_list> <mash_dist_threshold> <threads> [output_file]
  */
 
 #include "Sketch.h"
@@ -43,11 +43,11 @@ int main(int argc, char* argv[])
 {
     if (argc < 4) {
         cerr << "usage: " << argv[0]
-             << " <file_list> <dist_threshold> <threads> [output_file]" << endl;
+             << " <file_list> <mash_dist_threshold> <threads> [output_file]" << endl;
         return 1;
     }
     const string inputFile = argv[1];
-    const double thres     = stod(argv[2]);
+    const double thres     = stod(argv[2]); // Mash distance threshold
     int          nThreads  = stoi(argv[3]);
     if (nThreads < 1) nThreads = 1;
     const string outPath = (argc >= 5) ? argv[4] : "res.dist.SetSketch";
@@ -126,10 +126,17 @@ int main(int argc, char* argv[])
     cerr << "build CSR index: " << t4 - t3 << " s" << endl;
 
     // ── Phase 3: distance with exact verification ────────────────────────────
-    const int minMatchBlocks = Sketch::SetSketch::minMatchBlocksForDist(thres, NUM_BLOCKS);
+    static const int KMER_SIZE = 32;
+    const double p_exp  = std::exp(-static_cast<double>(KMER_SIZE) * thres);
+    const double minJac = p_exp / (2.0 - p_exp);
+    const double pBlock = minJac * minJac * minJac;
+    const double expected = NUM_BLOCKS * pBlock;
+    const double sd       = std::sqrt(expected * (1.0 - pBlock));
+    const int minMatchBlocks = std::max(
+        1, static_cast<int>(std::floor(expected - 6.0 * sd)));
 
     cerr << "pruning: minMatchBlocks=" << minMatchBlocks << "/" << NUM_BLOCKS
-         << "  (minJac=" << (1.0 - thres) << ", maxDist=" << thres << ")" << endl;
+         << "  (minJac=" << minJac << ", maxMashDist=" << thres << ")" << endl;
 
     // Handle output path (directory detection)
     string finalPath = outPath;
@@ -206,7 +213,9 @@ int main(int argc, char* argv[])
                 const uint8_t* c2 = &flat_cores[(size_t)j * m];
                 double jaccard = Sketch::SetSketch::jaccardFromCores(
                     core_i, c2, m, bip, factor, si, sizes[j]);
-                double dist = 1.0 - jaccard;
+                double dist = (jaccard >= 1.0) ? 0.0
+                    : -std::log(2.0 * jaccard / (1.0 + jaccard))
+                      / static_cast<double>(KMER_SIZE);
 
                 if (dist < thres) {
                     char line[1024];

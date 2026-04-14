@@ -6,7 +6,7 @@
  * iff the same k-mer produced the minimum for the same register in both —
  * probability of cross-register collision is ~2^-64.
  *
- * Jaccard = matching_registers / M.   Distance = 1 - Jaccard.
+ * Jaccard = matching_registers / M.   Distance = Mash distance.
  *
  * Usage:
  *   exe_test_ProbMinHash <file_list> <dist_threshold> <threads> [output_file]
@@ -103,14 +103,25 @@ int main(int argc, char* argv[])
     cerr << "build CSR index: " << t2 - t1 << " s" << endl;
 
     // ── Phase 3: Distance via inverted index ─────────────────────────────────
-    // ProbMinHash: Jaccard = common / M, dist = 1 - Jaccard
-    // kmerSize=0 tells computeDistances to use direct distance (1-J)
-    const int minCommon = Sketch::ProbMinHash4::minCommonForDist(maxDist, M);
+    // ProbMinHash: Jaccard = common / M, dist = Mash distance:
+    //   D = -(1/k) * ln(2J/(1+J))
+    // Convert maxDist -> minimum Jaccard threshold for pruning:
+    //   J_min = exp(-kD) / (2 - exp(-kD))
+    const double p_exp  = std::exp(-static_cast<double>(KSIZE) * maxDist);
+    const double minJac = p_exp / (2.0 - p_exp);
+    const int minCommon = std::max(1, static_cast<int>(std::ceil(minJac * M)));
     cerr << "pruning: minCommon=" << minCommon << "/" << mSize
-         << "  (minJac=" << (1.0 - maxDist) << ", maxDist=" << maxDist << ")" << endl;
+         << "  (minJac=" << minJac << ", maxMashDist=" << maxDist << ")" << endl;
 
     auto jaccardFn = [mSize](int common, int /*s0*/, int /*s1*/) -> double {
-        return Sketch::ProbMinHash4::jaccardFromCommon(common, static_cast<uint32_t>(mSize));
+        const double jac = Sketch::ProbMinHash4::jaccardFromCommon(
+            common, static_cast<uint32_t>(mSize));
+        if (jac <= 0.0) return 0.0;
+        if (jac >= 1.0) return 1.0;
+        const double mashDist = -std::log(2.0 * jac / (1.0 + jac))
+                                / static_cast<double>(KSIZE);
+        // computeDistances writes (1 - returned_value) as final distance.
+        return 1.0 - mashDist;
     };
 
     auto minCommonFn = [minCommon](int /*s0*/) -> int {
@@ -120,7 +131,7 @@ int main(int argc, char* argv[])
     double t3 = get_sec();
     Sketch::computeDistances<uint64_t>(
         csrIdx, skKeys, sketchSizes, fileList,
-        N, 0 /*kmerSize=0 → direct dist*/, maxDist,
+        N, 0 /*use direct mode; jaccardFn maps to 1 - MashDist*/, maxDist,
         jaccardFn, minCommonFn, outPath, nThreads);
     double t4 = get_sec();
 
