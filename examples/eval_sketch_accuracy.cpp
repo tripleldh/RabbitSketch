@@ -11,8 +11,8 @@
  * sliding-window weighted Jaccard (weighted PMH evaluation).
  *
  * Sketch methods & their k-mer sizes:
- *   HyperLogLog  (k=32 hardcoded, 8192 registers, np=13)
- *   SetSketch    (k=32 hardcoded, 8192 registers, np=13)
+ *   HyperLogLog  (k=32 hardcoded, 16384 registers, np=14)
+ *   SetSketch    (k=32 hardcoded, 16384 registers, np=14)
  *   KSSD         (k=20, half_k=10 half_subk=6 drlevel=3)
  *   MinHash      (k=21, sketch size 1024)
  *   ProbMinHash4 (k=21, 1024 registers)
@@ -294,14 +294,14 @@ int main(int argc, char* argv[])
                                            w.data(), seq_length,
                                            k21);
 
-        // ── HLL (k=32, np=13 → 8192 regs) ─────────────────────────────
-        Sketch::HyperLogLog h1(13), h2(13);
+        // ── HLL (k=32, np=14 → 16384 regs) ────────────────────────────
+        Sketch::HyperLogLog h1(14), h2(14);
         h1.update(seq_a.data());
         h2.update(seq_b.data());
         double hll_j = h1.jaccard_index(h2);
 
-        // ── SetSketch (k=32, np=13 → 8192 regs) ───────────────────────
-        Sketch::SetSketch s1(13), s2(13);
+        // ── SetSketch (k=32, np=14 → 16384 regs) ──────────────────────
+        Sketch::SetSketch s1(14), s2(14);
         s1.update(seq_a.data());
         s2.update(seq_b.data());
         double ss_j = s1.jaccard_index(s2);
@@ -544,11 +544,11 @@ int main(int argc, char* argv[])
         if (nwinA > 0 && nwinB > 0)
             gt_wj = exact_wj_from_subs(sub_at, w.data(), La, wB_ptr, Lb, k21);
 
-        Sketch::HyperLogLog  h1(13), h2(13);
+        Sketch::HyperLogLog  h1(14), h2(14);
         h1.update(seq_a.data()); h2.update(seq_b.data());
         double hll_j = h1.jaccard_index(h2);
 
-        Sketch::SetSketch    s1(13), s2(13);
+        Sketch::SetSketch    s1(14), s2(14);
         s1.update(seq_a.data()); s2.update(seq_b.data());
         double ss_j = s1.jaccard_index(s2);
 
@@ -941,11 +941,11 @@ int main(int argc, char* argv[])
         double rate = (mit != meta_map.end()) ? mit->second.rate : rates[ri];
 
         // ── sketch computations ─────────────────────────────────────────
-        Sketch::HyperLogLog h1(13), h2(13);
+        Sketch::HyperLogLog h1(14), h2(14);
         h1.update(sa.data()); h2.update(sb.data());
         double hll_j = h1.jaccard_index(h2);
 
-        Sketch::SetSketch ss1(13), ss2(13);
+        Sketch::SetSketch ss1(14), ss2(14);
         ss1.update(sa.data()); ss2.update(sb.data());
         double ss_j = ss1.jaccard_index(ss2);
 

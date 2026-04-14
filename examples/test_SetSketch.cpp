@@ -32,6 +32,7 @@
 #include <cstring>
 #include <cmath>
 #include <climits>
+#include <cstdint>
 #include <sys/stat.h>
 
 using namespace std;
@@ -58,49 +59,40 @@ int main(int argc, char* argv[])
     const int N = (int)fileList.size();
     cerr << "===== total files: " << N << "  (SetSketch)" << endl;
 
-    // ── Phase 0: pre-allocate sketches ───────────────────────────────────────
+    // ── Phase 0: prepare shared sketch parameters + output buffers ───────────
     static const int BITS = 13;
-    vector<Sketch::SetSketch> vsketch;
-    vsketch.reserve(N);
-    for (int i = 0; i < N; i++)
-        vsketch.emplace_back(BITS, 2.0, 20.0);
+    Sketch::SetSketch proto(BITS, 2.0, 20.0);
+    const int m         = proto.getM();
+    const double factor = proto.getFactor();
+    double bip_buf[64];
+    memcpy(bip_buf, proto.getBaseInvPow(), 64 * sizeof(double));
+    const double* bip = bip_buf;
+
+    vector<double>  sizes(N, 0.0);
+    vector<uint8_t> flat_cores((size_t)N * m, 0);
 
     // ── Phase 1a: parallel sketch construction ───────────────────────────────
     double t0 = get_sec();
 
     #pragma omp parallel for num_threads(nThreads) schedule(dynamic)
     for (int t = 0; t < N; t++) {
+        Sketch::SetSketch sk(BITS, 2.0, 20.0);
         gzFile fp = gzopen(fileList[t].c_str(), "r");
         if (!fp) continue;
         kseq_t* ks = kseq_init(fp);
         while (kseq_read(ks) >= 0)
-            vsketch[t].update(ks->seq.s);
+            sk.update(ks->seq.s);
         kseq_destroy(ks);
         gzclose(fp);
+
+        sizes[t] = sk.cardinality();
+        memcpy(&flat_cores[(size_t)t * m], sk.getCore().data(), m);
     }
 
     double t1 = get_sec();
     cerr << "sketch time: " << t1 - t0 << " s" << endl;
-
-    // ── Phase 1b: flatten cores + cardinalities ──────────────────────────────
-    const int m       = vsketch[0].getM();
-    const double factor = vsketch[0].getFactor();
-    double bip_buf[64];
-    memcpy(bip_buf, vsketch[0].getBaseInvPow(), 64 * sizeof(double));
-    const double* bip = bip_buf;
-
-    vector<double>  sizes(N);
-    vector<uint8_t> flat_cores((size_t)N * m);
-
-    #pragma omp parallel for num_threads(nThreads) schedule(static)
-    for (int i = 0; i < N; i++) {
-        sizes[i] = vsketch[i].cardinality();
-        memcpy(&flat_cores[(size_t)i * m], vsketch[i].getCore().data(), m);
-    }
-    { vector<Sketch::SetSketch>().swap(vsketch); }
-
-    double t2 = get_sec();
-    cerr << "flatten + free sketches: " << t2 - t1 << " s" << endl;
+    double t2 = t1;
+    cerr << "flatten + free sketches: skipped (direct build into flat_cores)" << endl;
 
     // ── Phase 1c: build local inverted index with block-of-3 keys ────────────
     const int NUM_BLOCKS = Sketch::SetSketch::numBlocks(m);
@@ -108,7 +100,7 @@ int main(int argc, char* argv[])
     const int actualThreads = min(nThreads, N);
     vector<phmap::flat_hash_map<uint32_t, vector<uint32_t>>> threadIdx(actualThreads);
 
-    #pragma omp parallel num_threads(nThreads)
+    #pragma omp parallel num_threads(actualThreads)
     {
         int tid = omp_get_thread_num();
         auto& localIdx = threadIdx[tid];
@@ -164,7 +156,7 @@ int main(int argc, char* argv[])
 
     #pragma omp parallel num_threads(nThreads)
     {
-        vector<int> isect(N, 0);
+        vector<uint16_t> isect(N, 0);
         vector<int> stamp(N, 0);
         int ep = 0;
         vector<int> cand;

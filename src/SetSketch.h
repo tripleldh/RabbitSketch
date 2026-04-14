@@ -18,7 +18,7 @@ namespace Sketch {
 
 class SetSketch {
 public:
-  SetSketch(int np, double base = 2.0, double a = 20.0);
+  SetSketch(int np = 14, double base = 2.0, double a = 20.0);
   ~SetSketch() = default;
 
   void update(char* seq);
