@@ -11,7 +11,7 @@
  * SetSketch Jaccard — zero accuracy loss.
  *
  * Usage:
- *   exe_test_SetSketch <file_list> <mash_dist_threshold> <threads> [output_file]
+ *   exe_test_SetSketch <file_list> <dist_threshold> <threads> [output_file]
  */
 
 #include "Sketch.h"
@@ -39,15 +39,22 @@ using namespace std;
 
 KSEQ_INIT(gzFile, gzread)
 
+static inline double mash_distance_from_jaccard(double jaccard, int kmerSize) {
+    if (jaccard <= 0.0) return 1.0;
+    if (jaccard >= 1.0) return 0.0;
+    const double p = (2.0 * jaccard) / (1.0 + jaccard);
+    return (p > 0.0) ? (-std::log(p) / static_cast<double>(kmerSize)) : 1.0;
+}
+
 int main(int argc, char* argv[])
 {
     if (argc < 4) {
         cerr << "usage: " << argv[0]
-             << " <file_list> <mash_dist_threshold> <threads> [output_file]" << endl;
+             << " <file_list> <dist_threshold> <threads> [output_file]" << endl;
         return 1;
     }
     const string inputFile = argv[1];
-    const double thres     = stod(argv[2]); // Mash distance threshold
+    const double thres     = stod(argv[2]);
     int          nThreads  = stoi(argv[3]);
     if (nThreads < 1) nThreads = 1;
     const string outPath = (argc >= 5) ? argv[4] : "res.dist.SetSketch";
@@ -68,8 +75,10 @@ int main(int argc, char* argv[])
     memcpy(bip_buf, proto.getBaseInvPow(), 64 * sizeof(double));
     const double* bip = bip_buf;
 
-    vector<double>  sizes(N, 0.0);
-    vector<uint8_t> flat_cores((size_t)N * m, 0);
+    vector<double>   sizes(N, 0.0);
+    vector<uint8_t>  flat_cores((size_t)N * m, 0);
+    const int NUM_BLOCKS = Sketch::SetSketch::numBlocks(m);
+    vector<uint32_t> flat_keys((size_t)N * NUM_BLOCKS, 0);
 
     // ── Phase 1a: parallel sketch construction ───────────────────────────────
     double t0 = get_sec();
@@ -95,7 +104,6 @@ int main(int argc, char* argv[])
     cerr << "flatten + free sketches: skipped (direct build into flat_cores)" << endl;
 
     // ── Phase 1c: build local inverted index with block-of-3 keys ────────────
-    const int NUM_BLOCKS = Sketch::SetSketch::numBlocks(m);
 
     const int actualThreads = min(nThreads, N);
     vector<phmap::flat_hash_map<uint32_t, vector<uint32_t>>> threadIdx(actualThreads);
@@ -108,10 +116,12 @@ int main(int argc, char* argv[])
         #pragma omp for schedule(static)
         for (int t = 0; t < N; t++) {
             const uint8_t* core = &flat_cores[(size_t)t * m];
+            uint32_t* keys_t = &flat_keys[(size_t)t * NUM_BLOCKS];
             for (int b = 0; b < NUM_BLOCKS; b++) {
                 uint32_t key = Sketch::SetSketch::blockHash(
                     static_cast<uint32_t>(b),
                     core[b * 3], core[b * 3 + 1], core[b * 3 + 2]);
+                keys_t[b] = key;
                 localIdx[key].push_back(static_cast<uint32_t>(t));
             }
         }
@@ -126,17 +136,13 @@ int main(int argc, char* argv[])
     cerr << "build CSR index: " << t4 - t3 << " s" << endl;
 
     // ── Phase 3: distance with exact verification ────────────────────────────
-    static const int KMER_SIZE = 32;
-    const double p_exp  = std::exp(-static_cast<double>(KMER_SIZE) * thres);
-    const double minJac = p_exp / (2.0 - p_exp);
-    const double pBlock = minJac * minJac * minJac;
-    const double expected = NUM_BLOCKS * pBlock;
-    const double sd       = std::sqrt(expected * (1.0 - pBlock));
-    const int minMatchBlocks = std::max(
-        1, static_cast<int>(std::floor(expected - 6.0 * sd)));
-
+    // Keep legacy (1-Jaccard style) pruning for speed/stability.
+    // We only switch final reported distance to Mash distance.
+    const int KMER_SIZE = 32;
+    const int minMatchBlocks = Sketch::SetSketch::minMatchBlocksForDist(thres, NUM_BLOCKS);
     cerr << "pruning: minMatchBlocks=" << minMatchBlocks << "/" << NUM_BLOCKS
-         << "  (minJac=" << minJac << ", maxMashDist=" << thres << ")" << endl;
+         << "  (legacy minJac=" << (1.0 - thres)
+         << ", maxMashDist=" << thres << ")" << endl;
 
     // Handle output path (directory detection)
     string finalPath = outPath;
@@ -180,12 +186,10 @@ int main(int argc, char* argv[])
                 ep = 1;
             }
 
-            // Reconstruct block keys from flat_cores (no skKeys storage needed)
             const uint8_t* core_i = &flat_cores[(size_t)i * m];
+            const uint32_t* keys_i = &flat_keys[(size_t)i * NUM_BLOCKS];
             for (int b = 0; b < NUM_BLOCKS; b++) {
-                uint32_t key = Sketch::SetSketch::blockHash(
-                    static_cast<uint32_t>(b),
-                    core_i[b * 3], core_i[b * 3 + 1], core_i[b * 3 + 2]);
+                uint32_t key = keys_i[b];
 
                 auto it = csrIdx.postIdx.find(key);
                 if (__builtin_expect(it == csrIdx.postIdx.end(), 0)) continue;
@@ -213,9 +217,7 @@ int main(int argc, char* argv[])
                 const uint8_t* c2 = &flat_cores[(size_t)j * m];
                 double jaccard = Sketch::SetSketch::jaccardFromCores(
                     core_i, c2, m, bip, factor, si, sizes[j]);
-                double dist = (jaccard >= 1.0) ? 0.0
-                    : -std::log(2.0 * jaccard / (1.0 + jaccard))
-                      / static_cast<double>(KMER_SIZE);
+                double dist = mash_distance_from_jaccard(jaccard, KMER_SIZE);
 
                 if (dist < thres) {
                     char line[1024];

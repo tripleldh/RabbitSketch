@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
-#include <limits>
 
 using namespace Sketch;
 
@@ -205,15 +204,6 @@ double SetSketch::jaccard_index(const SetSketch& other) const {
   return (inter > 0.0) ? inter / us : 0.0;
 }
 
-double SetSketch::distance(const SetSketch& other) const {
-  const double j = jaccard_index(other);
-  if (j <= 0.0) return std::numeric_limits<double>::infinity();
-  if (j >= 1.0) return 0.0;
-  constexpr double kmer_size = 32.0;
-  const double ratio = 2.0 * j / (1.0 + j);
-  return -std::log(ratio) / kmer_size;
-}
-
 SetSketch SetSketch::merge(const SetSketch& other) const {
   assert(np_ == other.np_ && base_ == other.base_ && a_ == other.a_);
   SetSketch ret(np_, base_, a_);
@@ -284,6 +274,7 @@ void SetSketch::update(char* seq) {
   uint32_t loc_count_at_min = count_at_min_;
   uint64_t loc_global_thresh = global_thresh_;
   uint8_t  loc_is_calc = is_calculated_;
+  bool     loc_min_dirty = false;
 
   uint64_t fwd_enc = 0, rev_enc = 0;
   int invalid_count = 0;
@@ -372,18 +363,8 @@ void SetSketch::update(char* seq) {
 
           // Update global lower-bound tracking
           if (cur == loc_min_reg) {
-            if (--loc_count_at_min == 0) {
-              uint8_t mn = core[0];
-              const size_t csz = core_.size();
-              for (size_t ii = 1; ii < csz; ii++)
-                if (core[ii] < mn) mn = core[ii];
-              loc_min_reg = mn;
-              uint32_t cnt = 0;
-              for (size_t ii = 0; ii < csz; ii++)
-                cnt += (core[ii] == mn);
-              loc_count_at_min = cnt;
-              loc_global_thresh = thresh[mn];
-            }
+            if (!loc_min_dirty && loc_count_at_min > 0 && --loc_count_at_min == 0)
+              loc_min_dirty = true;
           }
         }
       }
@@ -405,18 +386,8 @@ void SetSketch::update(char* seq) {
       loc_is_calc = 0;
 
       if (cur == loc_min_reg) {
-        if (--loc_count_at_min == 0) {
-          uint8_t mn = core[0];
-          const size_t csz = core_.size();
-          for (size_t ii = 1; ii < csz; ii++)
-            if (core[ii] < mn) mn = core[ii];
-          loc_min_reg = mn;
-          uint32_t cnt = 0;
-          for (size_t ii = 0; ii < csz; ii++)
-            cnt += (core[ii] == mn);
-          loc_count_at_min = cnt;
-          loc_global_thresh = thresh[mn];
-        }
+        if (!loc_min_dirty && loc_count_at_min > 0 && --loc_count_at_min == 0)
+          loc_min_dirty = true;
       }
     }
 #endif
@@ -437,18 +408,8 @@ void SetSketch::update(char* seq) {
           core[idx] = k;
           loc_is_calc = 0;
           if (cur == loc_min_reg) {
-            if (--loc_count_at_min == 0) {
-              uint8_t mn = core[0];
-              const size_t csz = core_.size();
-              for (size_t ii = 1; ii < csz; ii++)
-                if (core[ii] < mn) mn = core[ii];
-              loc_min_reg = mn;
-              uint32_t cnt = 0;
-              for (size_t ii = 0; ii < csz; ii++)
-                cnt += (core[ii] == mn);
-              loc_count_at_min = cnt;
-              loc_global_thresh = thresh[mn];
-            }
+            if (!loc_min_dirty && loc_count_at_min > 0 && --loc_count_at_min == 0)
+              loc_min_dirty = true;
           }
         }
       }
@@ -462,11 +423,16 @@ void SetSketch::update(char* seq) {
     rev_enc = (rev_enc >> 2) | ((uint64_t)er_in << (2 * (KMERLEN - 1)));
   }
 
-  // Write back locals
-  min_reg_ = loc_min_reg;
-  count_at_min_ = loc_count_at_min;
-  global_thresh_ = loc_global_thresh;
-  is_calculated_ = loc_is_calc;
+  // Write back locals. If min tracking was exhausted, rebuild once at end.
+  if (loc_min_dirty) {
+    is_calculated_ = loc_is_calc;
+    recompute_min();
+  } else {
+    min_reg_ = loc_min_reg;
+    count_at_min_ = loc_count_at_min;
+    global_thresh_ = loc_global_thresh;
+    is_calculated_ = loc_is_calc;
+  }
 }
 
 // ── containment ──────────────────────────────────────────────────────────────
@@ -483,13 +449,12 @@ double SetSketch::containment(const SetSketch& other) const
 
 // ── ani ──────────────────────────────────────────────────────────────────────
 // ANI = (2J / (1+J))^(1/kmer_size)   (Mash / Ondov et al. 2016)
-double SetSketch::ani(const SetSketch& other) const
+double SetSketch::ani(const SetSketch& other, int kmer_size) const
 {
   const double j = jaccard_index(other);
   if (j <= 0.0) return 0.0;
   if (j >= 1.0) return 1.0;
-  constexpr double kmer_size = 32.0;
-  return std::pow(2.0 * j / (1.0 + j), 1.0 / kmer_size);
+  return std::pow(2.0 * j / (1.0 + j), 1.0 / static_cast<double>(kmer_size));
 }
 
 // ── inverted index: block key extraction ─────────────────────────────────────

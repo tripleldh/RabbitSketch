@@ -257,9 +257,15 @@ void computeDistances(
                 if (jac > 1.0) jac = 1.0;
 
                 if (jac > minJacByDist) {
+                    double dist = 1.0 - jac;
+                    if (useMashDist) {
+                        dist = (jac >= 1.0) ? 0.0
+                            : -std::log(2.0 * jac / (1.0 + jac))
+                              / static_cast<double>(kmerSize);
+                    }
                     char line[1024];
                     int n = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
-                        fileList[i].c_str(), fileList[j].c_str(), 1.0 - jac);
+                        fileList[i].c_str(), fileList[j].c_str(), dist);
                     buf.append(line, static_cast<size_t>(n));
                 }
             }

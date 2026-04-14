@@ -131,7 +131,7 @@ int main(int argc, char* argv[])
     double t3 = get_sec();
     Sketch::computeDistances<uint64_t>(
         csrIdx, skKeys, sketchSizes, fileList,
-        N, 0 /*use direct mode; jaccardFn maps to 1 - MashDist*/, maxDist,
+        N, KSIZE /*k>0 enables Mash distance mode*/, maxDist,
         jaccardFn, minCommonFn, outPath, nThreads);
     double t4 = get_sec();
 
