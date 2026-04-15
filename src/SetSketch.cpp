@@ -17,6 +17,18 @@
 
 using namespace Sketch;
 
+// ── AVX2 64-bit lane multiply helper (no AVX-512DQ needed) ───────────────────
+#ifdef __AVX2__
+static inline __m256i ss_avx2_mullo_epi64(__m256i a, __m256i b) {
+    __m256i hi_a = _mm256_srli_epi64(a, 32);
+    __m256i hi_b = _mm256_srli_epi64(b, 32);
+    __m256i lo   = _mm256_mul_epu32(a, b);
+    __m256i mid  = _mm256_add_epi64(_mm256_mul_epu32(hi_a, b),
+                                     _mm256_mul_epu32(a, hi_b));
+    return _mm256_add_epi64(lo, _mm256_slli_epi64(mid, 32));
+}
+#endif
+
 // ── SIMD equal-register counter ───────────────────────────────────────────────
 namespace {
 static int setsketch_count_equal_regs(const uint8_t* __restrict__ a,
@@ -185,18 +197,32 @@ void SetSketch::ensure_cardinality() const {
   __m512d vsum0 = _mm512_setzero_pd();
   __m512d vsum1 = _mm512_setzero_pd();
   for (; i + 16 <= sz; i += 16) {
-    // 8 elements per gather
     __m128i vidx8_0 = _mm_loadl_epi64((__m128i*)(c + i));
     __m256i vidx32_0 = _mm256_cvtepu8_epi32(vidx8_0);
-    __m512d vals0 = _mm512_i32gather_pd(vidx32_0, tbl, 8);
-    vsum0 = _mm512_add_pd(vsum0, vals0);
+    vsum0 = _mm512_add_pd(vsum0, _mm512_i32gather_pd(vidx32_0, tbl, 8));
 
     __m128i vidx8_1 = _mm_loadl_epi64((__m128i*)(c + i + 8));
     __m256i vidx32_1 = _mm256_cvtepu8_epi32(vidx8_1);
-    __m512d vals1 = _mm512_i32gather_pd(vidx32_1, tbl, 8);
-    vsum1 = _mm512_add_pd(vsum1, vals1);
+    vsum1 = _mm512_add_pd(vsum1, _mm512_i32gather_pd(vidx32_1, tbl, 8));
   }
   sum = _mm512_reduce_add_pd(_mm512_add_pd(vsum0, vsum1));
+  for (; i < sz; i++) sum += tbl[c[i]];
+#elif defined(__AVX2__)
+  // 8 elements per iteration: zero-extend bytes → int32 indices → gather doubles
+  size_t i = 0;
+  __m256d vacc0 = _mm256_setzero_pd();
+  __m256d vacc1 = _mm256_setzero_pd();
+  for (; i + 8 <= sz; i += 8) {
+    __m128i vidx8   = _mm_loadl_epi64((const __m128i*)(c + i));
+    __m256i vidx32  = _mm256_cvtepu8_epi32(vidx8);
+    __m128i vlo     = _mm256_castsi256_si128(vidx32);
+    __m128i vhi     = _mm256_extracti128_si256(vidx32, 1);
+    vacc0 = _mm256_add_pd(vacc0, _mm256_i32gather_pd(tbl, vlo, 8));
+    vacc1 = _mm256_add_pd(vacc1, _mm256_i32gather_pd(tbl, vhi, 8));
+  }
+  alignas(32) double buf[4];
+  _mm256_store_pd(buf, _mm256_add_pd(vacc0, vacc1));
+  sum += buf[0] + buf[1] + buf[2] + buf[3];
   for (; i < sz; i++) sum += tbl[c[i]];
 #else
   for (size_t i = 0; i < sz; i++) sum += tbl[c[i]];
@@ -341,18 +367,51 @@ void SetSketch::update(char* seq, size_t len) {
     // ── SIMD hash (identical to HLL) ──────────────────────────────────────
     uint64_t hashvalv[8];
 #if defined(__AVX512F__) && defined(__AVX512DQ__)
-    __m512i vb = _mm512_loadu_si512((void*)resv);
-    __m512i vseed = _mm512_set1_epi64(42);
-    __m512i va = _mm512_xor_epi64(vb, vseed);
-    __m512i vtmp = _mm512_srli_epi64(va, 33);
-    vb = _mm512_xor_epi64(va, vtmp);
-    va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xff51afd7ed558ccdULL));
-    vtmp = _mm512_srli_epi64(va, 33);
-    vb = _mm512_xor_epi64(va, vtmp);
-    va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xc4ceb9fe1a85ec53ULL));
-    vtmp = _mm512_srli_epi64(va, 33);
-    vb = _mm512_xor_epi64(va, vtmp);
-    _mm512_storeu_si512(hashvalv, vb);
+    {
+      __m512i vb = _mm512_loadu_si512((void*)resv);
+      __m512i vseed = _mm512_set1_epi64(42);
+      __m512i va = _mm512_xor_epi64(vb, vseed);
+      __m512i vtmp = _mm512_srli_epi64(va, 33);
+      vb = _mm512_xor_epi64(va, vtmp);
+      va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xff51afd7ed558ccdULL));
+      vtmp = _mm512_srli_epi64(va, 33);
+      vb = _mm512_xor_epi64(va, vtmp);
+      va = _mm512_mullo_epi64(vb, _mm512_set1_epi64(0xc4ceb9fe1a85ec53ULL));
+      vtmp = _mm512_srli_epi64(va, 33);
+      vb = _mm512_xor_epi64(va, vtmp);
+      _mm512_storeu_si512(hashvalv, vb);
+    }
+#elif defined(__AVX2__)
+    {
+      // murmur3_fmix across 8 lanes using two 256-bit registers (4 lanes each)
+      const __m256i C1   = _mm256_set1_epi64x(0xff51afd7ed558ccdLL);
+      const __m256i C2   = _mm256_set1_epi64x(0xc4ceb9fe1a85ec53LL);
+      const __m256i SEED = _mm256_set1_epi64x(42LL);
+      __m256i vb0 = _mm256_loadu_si256((const __m256i*)resv);
+      __m256i vb1 = _mm256_loadu_si256((const __m256i*)(resv + 4));
+      // lanes 0-3
+      __m256i va0 = _mm256_xor_si256(vb0, SEED);
+      __m256i vt0 = _mm256_srli_epi64(va0, 33);
+      vb0 = _mm256_xor_si256(va0, vt0);
+      va0 = ss_avx2_mullo_epi64(vb0, C1);
+      vt0 = _mm256_srli_epi64(va0, 33);
+      vb0 = _mm256_xor_si256(va0, vt0);
+      va0 = ss_avx2_mullo_epi64(vb0, C2);
+      vt0 = _mm256_srli_epi64(va0, 33);
+      vb0 = _mm256_xor_si256(va0, vt0);
+      // lanes 4-7
+      __m256i va1 = _mm256_xor_si256(vb1, SEED);
+      __m256i vt1 = _mm256_srli_epi64(va1, 33);
+      vb1 = _mm256_xor_si256(va1, vt1);
+      va1 = ss_avx2_mullo_epi64(vb1, C1);
+      vt1 = _mm256_srli_epi64(va1, 33);
+      vb1 = _mm256_xor_si256(va1, vt1);
+      va1 = ss_avx2_mullo_epi64(vb1, C2);
+      vt1 = _mm256_srli_epi64(va1, 33);
+      vb1 = _mm256_xor_si256(va1, vt1);
+      _mm256_storeu_si256((__m256i*)hashvalv,       vb0);
+      _mm256_storeu_si256((__m256i*)(hashvalv + 4), vb1);
+    }
 #else
     for (int j = 0; j < lanes; j++)
       hashvalv[j] = mc::murmur3_fmix(resv[j], 42);
@@ -365,36 +424,73 @@ void SetSketch::update(char* seq, size_t len) {
       __m512i vmask = _mm512_set1_epi64(mask);
       __m512i vrest = _mm512_and_epi64(vhash, vmask);
 
-      // Global early exit: compare all 8 rests against global threshold
       __m512i vgt = _mm512_set1_epi64(loc_global_thresh);
-      // pass_mask bit j=1 → rest[j] >= global_thresh → might update
       __mmask8 pass_mask = _mm512_cmpge_epu64_mask(vrest, vgt);
 
-      // Quick check: if all 8 are filtered, skip entirely
       if (pass_mask != 0) {
         uint64_t restv[8];
         _mm512_storeu_si512(restv, vrest);
 
         for (int j = 0; j < lanes; j++) {
           if (!lane_valid[j]) continue;
-          if (!(pass_mask & (1 << j))) continue;  // global filter
+          if (!(pass_mask & (1 << j))) continue;
 
           uint32_t idx = (uint32_t)(hashvalv[j] >> shift);
           uint64_t rest = restv[j];
           uint8_t cur = core[idx];
-
-          // Per-register early exit
           if (rest < thresh[cur]) continue;
 
-          // Find new register value (scan thresholds, ~1-2 steps)
           uint8_t k = cur + 1;
           while (k < qmax && rest >= thresh[k]) ++k;
-
           core[idx] = k;
           wit[idx] = hashvalv[j];
           loc_is_calc = 0;
 
-          // Update global lower-bound tracking
+          if (cur == loc_min_reg) {
+            if (!loc_min_dirty && loc_count_at_min > 0 && --loc_count_at_min == 0)
+              loc_min_dirty = true;
+          }
+        }
+      }
+    }
+#elif defined(__AVX2__)
+    {
+      const __m256i vmask2 = _mm256_set1_epi64x((int64_t)mask);
+      __m256i vh0 = _mm256_loadu_si256((const __m256i*)hashvalv);
+      __m256i vh1 = _mm256_loadu_si256((const __m256i*)(hashvalv + 4));
+      __m256i vr0 = _mm256_and_si256(vh0, vmask2);
+      __m256i vr1 = _mm256_and_si256(vh1, vmask2);
+
+      // Unsigned >=: rest >= thresh  ⟺  !(thresh > rest)  via sign-flip trick
+      const __m256i sign2 = _mm256_set1_epi64x((int64_t)0x8000000000000000ULL);
+      __m256i vgt_adj = _mm256_xor_si256(_mm256_set1_epi64x((int64_t)loc_global_thresh), sign2);
+      // fail bit i = 1 when thresh > rest[i] (unsigned)
+      int f0 = _mm256_movemask_pd(_mm256_castsi256_pd(
+                   _mm256_cmpgt_epi64(vgt_adj, _mm256_xor_si256(vr0, sign2))));
+      int f1 = _mm256_movemask_pd(_mm256_castsi256_pd(
+                   _mm256_cmpgt_epi64(vgt_adj, _mm256_xor_si256(vr1, sign2))));
+      uint8_t pass_mask = (uint8_t)~((f1 << 4) | f0);
+
+      if (pass_mask != 0) {
+        uint64_t restv[8];
+        _mm256_storeu_si256((__m256i*)restv,       vr0);
+        _mm256_storeu_si256((__m256i*)(restv + 4), vr1);
+
+        for (int j = 0; j < lanes; j++) {
+          if (!lane_valid[j]) continue;
+          if (!(pass_mask & (1u << j))) continue;
+
+          uint32_t idx = (uint32_t)(hashvalv[j] >> shift);
+          uint64_t rest = restv[j];
+          uint8_t cur = core[idx];
+          if (rest < thresh[cur]) continue;
+
+          uint8_t k = cur + 1;
+          while (k < qmax && rest >= thresh[k]) ++k;
+          core[idx] = k;
+          wit[idx] = hashvalv[j];
+          loc_is_calc = 0;
+
           if (cur == loc_min_reg) {
             if (!loc_min_dirty && loc_count_at_min > 0 && --loc_count_at_min == 0)
               loc_min_dirty = true;
@@ -407,11 +503,11 @@ void SetSketch::update(char* seq, size_t len) {
     for (int j = 0; j < lanes; j++) {
       if (!lane_valid[j]) continue;
       uint64_t rest = hashvalv[j] & mask;
-      if (rest < loc_global_thresh) continue;  // global filter
+      if (rest < loc_global_thresh) continue;
 
       uint32_t idx = (uint32_t)(hashvalv[j] >> shift);
       uint8_t cur = core[idx];
-      if (rest < thresh[cur]) continue;  // per-register filter
+      if (rest < thresh[cur]) continue;
 
       uint8_t k = cur + 1;
       while (k < qmax && rest >= thresh[k]) ++k;

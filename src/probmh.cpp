@@ -37,6 +37,18 @@
 #include <cmath>
 #include <limits>
 
+// ── AVX2 64-bit lane multiply helper (no AVX-512DQ needed) ───────────────────
+#ifdef __AVX2__
+static inline __m256i pmh_avx2_mullo_epi64(__m256i a, __m256i b) {
+    __m256i hi_a = _mm256_srli_epi64(a, 32);
+    __m256i hi_b = _mm256_srli_epi64(b, 32);
+    __m256i lo   = _mm256_mul_epu32(a, b);
+    __m256i mid  = _mm256_add_epi64(_mm256_mul_epu32(hi_a, b),
+                                     _mm256_mul_epu32(a, hi_b));
+    return _mm256_add_epi64(lo, _mm256_slli_epi64(mid, 32));
+}
+#endif
+
 using namespace Sketch;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -687,7 +699,6 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
         {
             __m512i vb = _mm512_loadu_si512((const void*)resv);
             __m512i vs = _mm512_set1_epi64((int64_t)loc_seed);
-            // Round 1: fmix(canonical ^ seed)
             __m512i va = _mm512_xor_epi64(vb, vs);
             __m512i vt = _mm512_srli_epi64(va, 33);
             vb = _mm512_xor_epi64(va, vt);
@@ -698,7 +709,6 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
             vt = _mm512_srli_epi64(va, 33);
             vb = _mm512_xor_epi64(va, vt);
 #ifndef PMH_FAST_HASH
-            // Round 2: fmix(hash ^ seed) – same murmur3_fmix with seed XOR
             va = _mm512_xor_epi64(vb, vs);
             vt = _mm512_srli_epi64(va, 33);
             vb = _mm512_xor_epi64(va, vt);
@@ -710,12 +720,66 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
             vb = _mm512_xor_epi64(va, vt);
 #endif
             _mm512_storeu_si512(rng_innerv, vb);
-            // hv_fast = ((rng >> 11) * PMH_INV2_53) * loc_c1_0
-            // Two multiplies preserve scalar FP evaluation order exactly.
             __m512d vd = _mm512_cvtepu64_pd(_mm512_srli_epi64(vb, 11));
             vd = _mm512_mul_pd(vd, _mm512_set1_pd(PMH_INV2_53));
             _mm512_storeu_pd(hv_fastv,
                 _mm512_mul_pd(vd, _mm512_set1_pd(loc_c1_0)));
+        }
+#elif defined(__AVX2__)
+        {
+            // murmur3_fmix across 8 lanes (2 × 4-lane AVX2 registers)
+            const __m256i C1   = _mm256_set1_epi64x(0xff51afd7ed558ccdLL);
+            const __m256i C2   = _mm256_set1_epi64x(0xc4ceb9fe1a85ec53LL);
+            const __m256i VS   = _mm256_set1_epi64x((int64_t)loc_seed);
+            __m256i vb0 = _mm256_loadu_si256((const __m256i*)resv);
+            __m256i vb1 = _mm256_loadu_si256((const __m256i*)(resv + 4));
+            // Round 1 – lanes 0-3
+            __m256i va0 = _mm256_xor_si256(vb0, VS);
+            __m256i vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            va0 = pmh_avx2_mullo_epi64(vb0, C1);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            va0 = pmh_avx2_mullo_epi64(vb0, C2);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            // Round 1 – lanes 4-7
+            __m256i va1 = _mm256_xor_si256(vb1, VS);
+            __m256i vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+            va1 = pmh_avx2_mullo_epi64(vb1, C1);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+            va1 = pmh_avx2_mullo_epi64(vb1, C2);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+#ifndef PMH_FAST_HASH
+            // Round 2 – lanes 0-3
+            va0 = _mm256_xor_si256(vb0, VS);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            va0 = pmh_avx2_mullo_epi64(vb0, C1);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            va0 = pmh_avx2_mullo_epi64(vb0, C2);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            // Round 2 – lanes 4-7
+            va1 = _mm256_xor_si256(vb1, VS);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+            va1 = pmh_avx2_mullo_epi64(vb1, C1);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+            va1 = pmh_avx2_mullo_epi64(vb1, C2);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+#endif
+            _mm256_storeu_si256((__m256i*)rng_innerv,       vb0);
+            _mm256_storeu_si256((__m256i*)(rng_innerv + 4), vb1);
+            // hv_fast computed scalarly (avoids complex AVX2 uint64→double conversion)
+            for (int j = 0; j < lanes; ++j)
+                hv_fastv[j] = (double)(rng_innerv[j] >> 11) * PMH_INV2_53 * loc_c1_0;
         }
 #else
         for (int j = 0; j < lanes; ++j) {
@@ -737,7 +801,6 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
         double cur_max = tracker_.getMax();
 #if defined(__AVX512F__) && defined(__AVX512DQ__)
         {
-            // Build lane-valid bitmask (branchless byte shifts).
             const uint8_t lv_mask =
                 (uint8_t)lane_valid[0]         | ((uint8_t)lane_valid[1] << 1) |
                 ((uint8_t)lane_valid[2] << 2)  | ((uint8_t)lane_valid[3] << 3) |
@@ -746,7 +809,6 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
 
             __m512d vhf  = _mm512_loadu_pd(hv_fastv);
             __m512d vone = _mm512_set1_pd(1.0);
-            // Lanes with hv_fast >= 1.0 must enter addHashFromRng regardless.
             const uint8_t above1 = (uint8_t)_mm512_cmp_pd_mask(vhf, vone, _CMP_GE_OQ);
 
             __m512d vw      = _mm512_loadu_pd(batch_w);
@@ -756,12 +818,54 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
                 vw, _mm512_setzero_pd(), _CMP_GT_OQ);
             uint8_t candidates = lv_mask & ((above1 | blt) & wpos);
 
-            // Inner loop runs only for candidates – typically 0 iterations.
             while (candidates) {
                 const int j = __builtin_ctz(candidates);
                 candidates &= (uint8_t)(candidates - 1);
                 const double w = batch_w[j];
-                // Re-check: cur_max may have tightened from a previous lane.
+                if (__builtin_expect(hv_fastv[j] < 1.0, 1) &&
+                    hv_fastv[j] >= cur_max * w)
+                    continue;
+                addHashFromRng(rng_innerv[j], w);
+                cur_max = tracker_.getMax();
+            }
+        }
+#elif defined(__AVX2__)
+        {
+            const uint8_t lv_mask =
+                (uint8_t)lane_valid[0]         | ((uint8_t)lane_valid[1] << 1) |
+                ((uint8_t)lane_valid[2] << 2)  | ((uint8_t)lane_valid[3] << 3) |
+                ((uint8_t)lane_valid[4] << 4)  | ((uint8_t)lane_valid[5] << 5) |
+                ((uint8_t)lane_valid[6] << 6)  | ((uint8_t)lane_valid[7] << 7);
+
+            __m256d vhf0 = _mm256_loadu_pd(hv_fastv);
+            __m256d vhf1 = _mm256_loadu_pd(hv_fastv + 4);
+            __m256d vone = _mm256_set1_pd(1.0);
+            __m256d vcm  = _mm256_set1_pd(cur_max);
+            __m256d vw0  = _mm256_loadu_pd(batch_w);
+            __m256d vw1  = _mm256_loadu_pd(batch_w + 4);
+
+            // above1: hv_fast >= 1.0
+            int mm_a1_0 = _mm256_movemask_pd(_mm256_cmp_pd(vhf0, vone, _CMP_GE_OQ));
+            int mm_a1_1 = _mm256_movemask_pd(_mm256_cmp_pd(vhf1, vone, _CMP_GE_OQ));
+            // blt: hv_fast < cur_max * w  (potential new minimum)
+            int mm_bl_0 = _mm256_movemask_pd(_mm256_cmp_pd(vhf0,
+                              _mm256_mul_pd(vcm, vw0), _CMP_LT_OQ));
+            int mm_bl_1 = _mm256_movemask_pd(_mm256_cmp_pd(vhf1,
+                              _mm256_mul_pd(vcm, vw1), _CMP_LT_OQ));
+            // wpos: w > 0
+            __m256d vzero = _mm256_setzero_pd();
+            int mm_wp_0 = _mm256_movemask_pd(_mm256_cmp_pd(vw0, vzero, _CMP_GT_OQ));
+            int mm_wp_1 = _mm256_movemask_pd(_mm256_cmp_pd(vw1, vzero, _CMP_GT_OQ));
+
+            uint8_t above1 = (uint8_t)(mm_a1_0 | (mm_a1_1 << 4));
+            uint8_t blt    = (uint8_t)(mm_bl_0  | (mm_bl_1  << 4));
+            uint8_t wpos   = (uint8_t)(mm_wp_0  | (mm_wp_1  << 4));
+            uint8_t candidates = lv_mask & ((above1 | blt) & wpos);
+
+            while (candidates) {
+                const int j = __builtin_ctz(candidates);
+                candidates &= (uint8_t)(candidates - 1);
+                const double w = batch_w[j];
                 if (__builtin_expect(hv_fastv[j] < 1.0, 1) &&
                     hv_fastv[j] >= cur_max * w)
                     continue;
@@ -770,7 +874,7 @@ void ProbMinHash4::updateWeightedImpl(const char* seq, uint64_t length,
             }
         }
 #else
-        // Scalar fallback (non-AVX-512).
+        // Scalar fallback (non-AVX).
         for (int j = 0; j < lanes; ++j) {
             if (!lane_valid[j]) continue;
             const double w = batch_w[j];
@@ -947,6 +1051,60 @@ void ProbMinHash4::updateEntropy(const char* seq, uint64_t length, double w_min)
             _mm512_storeu_pd(hv_fastv,
                 _mm512_mul_pd(vd, _mm512_set1_pd(loc_c1_0)));
         }
+#elif defined(__AVX2__)
+        {
+            const __m256i C1   = _mm256_set1_epi64x(0xff51afd7ed558ccdLL);
+            const __m256i C2   = _mm256_set1_epi64x(0xc4ceb9fe1a85ec53LL);
+            const __m256i VS   = _mm256_set1_epi64x(static_cast<int64_t>(loc_seed));
+            __m256i vb0 = _mm256_loadu_si256((const __m256i*)resv);
+            __m256i vb1 = _mm256_loadu_si256((const __m256i*)(resv + 4));
+            // Round 1 – lanes 0-3
+            __m256i va0 = _mm256_xor_si256(vb0, VS);
+            __m256i vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            va0 = pmh_avx2_mullo_epi64(vb0, C1);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            va0 = pmh_avx2_mullo_epi64(vb0, C2);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            // Round 1 – lanes 4-7
+            __m256i va1 = _mm256_xor_si256(vb1, VS);
+            __m256i vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+            va1 = pmh_avx2_mullo_epi64(vb1, C1);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+            va1 = pmh_avx2_mullo_epi64(vb1, C2);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+#ifndef PMH_FAST_HASH
+            // Round 2 – lanes 0-3
+            va0 = _mm256_xor_si256(vb0, VS);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            va0 = pmh_avx2_mullo_epi64(vb0, C1);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            va0 = pmh_avx2_mullo_epi64(vb0, C2);
+            vt0 = _mm256_srli_epi64(va0, 33);
+            vb0 = _mm256_xor_si256(va0, vt0);
+            // Round 2 – lanes 4-7
+            va1 = _mm256_xor_si256(vb1, VS);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+            va1 = pmh_avx2_mullo_epi64(vb1, C1);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+            va1 = pmh_avx2_mullo_epi64(vb1, C2);
+            vt1 = _mm256_srli_epi64(va1, 33);
+            vb1 = _mm256_xor_si256(va1, vt1);
+#endif
+            _mm256_storeu_si256((__m256i*)rng_innerv,       vb0);
+            _mm256_storeu_si256((__m256i*)(rng_innerv + 4), vb1);
+            for (int j = 0; j < lanes; ++j)
+                hv_fastv[j] = static_cast<double>(rng_innerv[j] >> 11) * PMH_INV2_53 * loc_c1_0;
+        }
 #else
         for (int j = 0; j < lanes; ++j) {
             uint64_t h = mc::murmur3_fmix(resv[j], loc_seed);
@@ -977,6 +1135,47 @@ void ProbMinHash4::updateEntropy(const char* seq, uint64_t length, double w_min)
             const uint8_t blt  = static_cast<uint8_t>(_mm512_cmp_pd_mask(vhf, vthresh, _CMP_LT_OQ));
             const uint8_t wpos = static_cast<uint8_t>(_mm512_cmp_pd_mask(
                 vw, _mm512_setzero_pd(), _CMP_GT_OQ));
+            uint8_t candidates = lv_mask & ((above1 | blt) & wpos);
+
+            while (candidates) {
+                const int j = __builtin_ctz(candidates);
+                candidates &= static_cast<uint8_t>(candidates - 1);
+                const double w = batch_w[j];
+                if (__builtin_expect(hv_fastv[j] < 1.0, 1) &&
+                    hv_fastv[j] >= cur_max * w)
+                    continue;
+                addHashFromRng(rng_innerv[j], w);
+                cur_max = tracker_.getMax();
+            }
+        }
+#elif defined(__AVX2__)
+        {
+            const uint8_t lv_mask =
+                static_cast<uint8_t>(lane_valid[0])        | (static_cast<uint8_t>(lane_valid[1]) << 1) |
+                (static_cast<uint8_t>(lane_valid[2]) << 2) | (static_cast<uint8_t>(lane_valid[3]) << 3) |
+                (static_cast<uint8_t>(lane_valid[4]) << 4) | (static_cast<uint8_t>(lane_valid[5]) << 5) |
+                (static_cast<uint8_t>(lane_valid[6]) << 6) | (static_cast<uint8_t>(lane_valid[7]) << 7);
+
+            __m256d vhf0 = _mm256_loadu_pd(hv_fastv);
+            __m256d vhf1 = _mm256_loadu_pd(hv_fastv + 4);
+            __m256d vone = _mm256_set1_pd(1.0);
+            __m256d vcm  = _mm256_set1_pd(cur_max);
+            __m256d vw0  = _mm256_loadu_pd(batch_w);
+            __m256d vw1  = _mm256_loadu_pd(batch_w + 4);
+
+            int mm_a1_0 = _mm256_movemask_pd(_mm256_cmp_pd(vhf0, vone, _CMP_GE_OQ));
+            int mm_a1_1 = _mm256_movemask_pd(_mm256_cmp_pd(vhf1, vone, _CMP_GE_OQ));
+            int mm_bl_0 = _mm256_movemask_pd(_mm256_cmp_pd(vhf0,
+                              _mm256_mul_pd(vcm, vw0), _CMP_LT_OQ));
+            int mm_bl_1 = _mm256_movemask_pd(_mm256_cmp_pd(vhf1,
+                              _mm256_mul_pd(vcm, vw1), _CMP_LT_OQ));
+            __m256d vzero = _mm256_setzero_pd();
+            int mm_wp_0 = _mm256_movemask_pd(_mm256_cmp_pd(vw0, vzero, _CMP_GT_OQ));
+            int mm_wp_1 = _mm256_movemask_pd(_mm256_cmp_pd(vw1, vzero, _CMP_GT_OQ));
+
+            uint8_t above1 = static_cast<uint8_t>(mm_a1_0 | (mm_a1_1 << 4));
+            uint8_t blt    = static_cast<uint8_t>(mm_bl_0  | (mm_bl_1  << 4));
+            uint8_t wpos   = static_cast<uint8_t>(mm_wp_0  | (mm_wp_1  << 4));
             uint8_t candidates = lv_mask & ((above1 | blt) & wpos);
 
             while (candidates) {
