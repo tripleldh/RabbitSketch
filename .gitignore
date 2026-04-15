@@ -39,3 +39,5 @@ examples/run_rabbitsketch_eval.sh
 examples/run_rabbitsketch_file_eval.sh
 examples/test_TMH.cpp
 examples/result.*
+res.*
+*.log

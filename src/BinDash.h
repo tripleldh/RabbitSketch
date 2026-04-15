@@ -81,11 +81,21 @@ public:
     double ani(const BinDash& other) const;
 
     const uint64_t* getSignatures() const { return usigs_.data(); }
-    uint32_t getNumWords()  const { return sketchsize64_ * bbits_; }
-    uint32_t getNumBins()   const { return nbins_; }
-    uint32_t getBbits()     const { return bbits_; }
-    int      getKmerSize()  const { return kmer_size_; }
-    size_t   memoryBytes()  const { return usigs_.size() * sizeof(uint64_t); }
+    uint32_t getNumWords()    const { return sketchsize64_ * bbits_; }
+    uint32_t getNumBins()     const { return nbins_; }
+    uint32_t getBbits()       const { return bbits_; }
+    int      getKmerSize()    const { return kmer_size_; }
+    size_t   memoryBytes()    const { return usigs_.size() * sizeof(uint64_t); }
+    uint32_t getRawNonempty() const { return raw_nonempty_; }
+
+    /**
+     * Count matching b-bit values between two flat packed sketches.
+     * Equivalent to the inner SIMD kernel used by jaccard(), but callable
+     * on raw pointers — enabling flat-array storage without BinDash objects.
+     * @param a, b   pointers to packed arrays of sketchsize64 * bbits uint64_t words
+     */
+    static uint64_t countSameBits(const uint64_t* a, const uint64_t* b,
+                                  uint32_t sketchsize64, uint32_t bbits);
 
     /**
      * Extract the truncated bbits-bit value for a single bin (inverse of packBits).

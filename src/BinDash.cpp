@@ -195,8 +195,8 @@ void BinDash::ensureFinalized() const {
     const_cast<BinDash*>(this)->finalize();
 }
 
-static inline uint64_t bd_count_same_packed(const uint64_t* a, const uint64_t* b,
-                                            uint32_t sketchsize64, uint32_t bbits) {
+static uint64_t bd_count_same_packed(const uint64_t* a, const uint64_t* b,
+                                     uint32_t sketchsize64, uint32_t bbits) {
     uint64_t same = 0;
     for (uint32_t g = 0; g < sketchsize64; ++g) {
         uint64_t eqmask = ~0ULL;
@@ -237,6 +237,16 @@ static inline uint64_t bd_count_same_packed(const uint64_t* a, const uint64_t* b
         same += static_cast<uint64_t>(__builtin_popcountll(eqmask));
     }
     return same;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Public static wrapper — enables flat-array distance computation without
+// constructing BinDash objects.
+// ═══════════════════════════════════════════════════════════════════════════
+
+uint64_t BinDash::countSameBits(const uint64_t* a, const uint64_t* b,
+                                uint32_t sk64, uint32_t bb) {
+    return bd_count_same_packed(a, b, sk64, bb);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
