@@ -121,7 +121,7 @@ int main(int argc, char* argv[])
                 if (dist < maxDist) {
                     char line[1024];
                     int n = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
-                                     fileList[i].c_str(), fileList[j].c_str(), 1.0 - jac);
+                                     fileList[i].c_str(), fileList[j].c_str(), dist);
                     buf.append(line, static_cast<size_t>(n));
                 }
             }

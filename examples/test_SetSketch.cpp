@@ -88,7 +88,7 @@ int main(int argc, char* argv[])
     cerr << "===== total files: " << N << "  (SetSketch)" << endl;
 
     // ── Sketch parameters ────────────────────────────────────────────────────
-    static const int BITS = 12;
+    static const int BITS = 13;
     static const int KMER_SIZE = 32;
     static const int WITNESS_STRIDE = 4;
 
@@ -221,6 +221,33 @@ int main(int argc, char* argv[])
         auto csrIdx = Sketch::buildCSRIndex<uint64_t>(threadIdx, nThreads);
         double ti2 = get_sec();
         cerr << "CSR build: " << ti2 - ti1 << " s" << endl;
+
+        // ── Post-filter skKeys: drop singleton witnesses ──────────────────────
+        // A singleton key (present in exactly one sketch) can never produce a
+        // candidate pair — any lookup in postIdx for it returns an empty list.
+        // All shared keys between any two sketches appear in ≥2 sketches and
+        // therefore survive singleton removal in the CSR, so P(miss) is unchanged.
+        // In practice ~75% of keys are singletons → saves ~245 MB and speeds up
+        // candidate generation by the same fraction.
+        {
+            size_t kbefore = 0, kafter = 0;
+            #pragma omp parallel for num_threads(nThreads) schedule(dynamic, 64) \
+                                     reduction(+:kbefore,kafter)
+            for (int t = 0; t < N; t++) {
+                kbefore += skKeys[t].size();
+                vector<uint64_t> kept;
+                kept.reserve(skKeys[t].size() / 5);
+                for (uint64_t key : skKeys[t])
+                    if (csrIdx.postIdx.count(key))
+                        kept.push_back(key);
+                kafter += kept.size();
+                skKeys[t] = std::move(kept);
+            }
+            cerr << "skKeys singleton-filtered: " << kbefore << " -> " << kafter
+                 << " (" << (kbefore > 0 ? 100.0 * kafter / kbefore : 0.0)
+                 << "% retained, freed ~"
+                 << (kbefore - kafter) * 8 / (1 << 20) << " MB)\n";
+        }
 
         // Conservative minCommon: 8-sigma below expected
         const double sd = sqrt(expectedOverlap * (1.0 - minJac));

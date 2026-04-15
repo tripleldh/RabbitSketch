@@ -114,14 +114,8 @@ int main(int argc, char* argv[])
          << "  (minJac=" << minJac << ", maxMashDist=" << maxDist << ")" << endl;
 
     auto jaccardFn = [mSize](int common, int /*s0*/, int /*s1*/) -> double {
-        const double jac = Sketch::ProbMinHash4::jaccardFromCommon(
+        return Sketch::ProbMinHash4::jaccardFromCommon(
             common, static_cast<uint32_t>(mSize));
-        if (jac <= 0.0) return 0.0;
-        if (jac >= 1.0) return 1.0;
-        const double mashDist = -std::log(2.0 * jac / (1.0 + jac))
-                                / static_cast<double>(KSIZE);
-        // computeDistances writes (1 - returned_value) as final distance.
-        return 1.0 - mashDist;
     };
 
     auto minCommonFn = [minCommon](int /*s0*/) -> int {
