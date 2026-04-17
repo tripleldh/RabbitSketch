@@ -12,6 +12,7 @@
 #define _FASTKMV_H_
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <cassert>
 
@@ -34,12 +35,38 @@ public:
     void update(const char* seq, uint64_t length);
 
     /**
-     * KMV Jaccard: merge two sorted bottom-k lists (conceptually), count
-     * overlap in the k smallest distinct values.
+     * KMV Jaccard on two sorted bottom-k lists: count the overlap in the
+     * k smallest distinct values of the union.
+     *
+     * @param other        the other sketch (must share k and kmer_size).
+     * @param min_jaccard  target Jaccard threshold for early-abort. If
+     *                     > 0, the intersection loop is aborted as soon
+     *                     as the achievable match count is guaranteed to
+     *                     fall below ceil(min_jaccard * k); the function
+     *                     then returns 0.0 (a value strictly below any
+     *                     positive threshold). With the default value
+     *                     0.0 no pruning is applied and the exact KMV
+     *                     Jaccard is returned.
      */
-    double jaccard(const FastKMV& other) const;
+    double jaccard(const FastKMV& other, double min_jaccard = 0.0) const;
 
-    double distance(const FastKMV& other) const;
+    /**
+     * Mash distance D = -ln(2J/(1+J)) / k, derived from KMV Jaccard.
+     *
+     * @param other         the other sketch (must share k and kmer_size).
+     * @param max_distance  target distance threshold. If finite, it is
+     *                      mapped to a minimum Jaccard via the inverse
+     *                      Mash formula and handed to jaccard() so that
+     *                      pairs that cannot meet the threshold abort
+     *                      before the intersection finishes; aborted
+     *                      pairs return +infinity (strictly above any
+     *                      finite threshold). With the default value
+     *                      +infinity no pruning is applied and the
+     *                      exact Mash distance is returned.
+     */
+    double distance(const FastKMV& other,
+                    double max_distance =
+                        std::numeric_limits<double>::infinity()) const;
 
     /**
      * KMV cardinality estimate: (k-1) * KEY_MAX / tau_k.

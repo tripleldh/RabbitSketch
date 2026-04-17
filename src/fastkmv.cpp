@@ -499,7 +499,7 @@ static uint64_t fkmv_scalar_intersect(const uint64_t* list1, uint64_t size1,
     return counter;
 }
 
-double FastKMV::jaccard(const FastKMV& other) const {
+double FastKMV::jaccard(const FastKMV& other, double min_jaccard) const {
     assert(k_ == other.k_);
     ensureSorted();
     other.ensureSorted();
@@ -511,6 +511,16 @@ double FastKMV::jaccard(const FastKMV& other) const {
     const uint64_t k  = k_;
 
     if (sa == 0 || sb == 0) return 0.0;
+
+    // Jaccard-threshold prefilter (active iff min_jaccard > 0):
+    // KMV denominator d ≤ k, so to reach J ≥ min_jaccard the number of
+    // matching hashes must satisfy common ≥ ceil(min_jaccard * k).  When
+    // the achievable common falls below this bound we abort and return
+    // 0.0, which is strictly below any positive threshold.
+    const uint64_t need = (min_jaccard > 0.0)
+        ? static_cast<uint64_t>(std::ceil(min_jaccard * static_cast<double>(k)))
+        : 0ULL;
+    if (need > 0 && std::min(sa, sb) < need) return 0.0;
 
     uint64_t ia = 0, ib = 0;
     uint64_t common = 0;
@@ -556,6 +566,11 @@ double FastKMV::jaccard(const FastKMV& other) const {
                 __mmask8 hits = cmpA | cmpB;
                 common += _mm_popcnt_u64(hits);
 
+                if (need > 0 &&
+                    common + std::min(sa - ia, sb - ib) < need) {
+                    return 0.0;
+                }
+
                 if (ia + ib - common >= stop) {
                     common -= _mm_popcnt_u64(hits);
                     ia -= (a_max <= b_max) * 8;
@@ -597,6 +612,11 @@ double FastKMV::jaccard(const FastKMV& other) const {
                 int mask = _mm256_movemask_pd(_mm256_castsi256_pd(combined));
                 common += _mm_popcnt_u64(static_cast<unsigned>(mask));
 
+                if (need > 0 &&
+                    common + std::min(sa - ia, sb - ib) < need) {
+                    return 0.0;
+                }
+
                 if (ia + ib - common >= stop) break;
             }
         }
@@ -610,6 +630,8 @@ double FastKMV::jaccard(const FastKMV& other) const {
                                     remaining, &ia_s, &ib_s);
     ia += ia_s;
     ib += ib_s;
+
+    if (need > 0 && common < need) return 0.0;
 
     uint64_t distinct = ia + ib - common;
     while (distinct < k && ia < sa) { ++distinct; ++ia; }
@@ -658,8 +680,20 @@ double FastKMV::containment(const FastKMV& other) const {
 //   D = -ln(2J/(1+J)) / k   (Ondov et al. 2016)
 // ═══════════════════════════════════════════════════════════════════════════
 
-double FastKMV::distance(const FastKMV& other) const {
-    const double j = jaccard(other);
+double FastKMV::distance(const FastKMV& other, double max_distance) const {
+    // Derive the minimum Jaccard that still meets max_distance via the
+    // inverse Mash formula: D = -ln(2J/(1+J))/k  ⟹  J = 1/(2·exp(k·D) - 1).
+    // When max_distance = +∞ (default) we get min_jaccard = 0 ⟹ no pruning.
+    double min_jaccard = 0.0;
+    if (std::isfinite(max_distance) && max_distance >= 0.0) {
+        const double kd    = static_cast<double>(kmer_size_) * max_distance;
+        const double denom = 2.0 * std::exp(kd) - 1.0;
+        min_jaccard = (denom > 0.0) ? (1.0 / denom) : 1.0;
+        if (min_jaccard < 0.0) min_jaccard = 0.0;
+        if (min_jaccard > 1.0) min_jaccard = 1.0;
+    }
+
+    const double j = jaccard(other, min_jaccard);
     if (j <= 0.0) return std::numeric_limits<double>::infinity();
     if (j >= 1.0) return 0.0;
     const double ratio = 2.0 * j / (1.0 + j);
