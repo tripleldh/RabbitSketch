@@ -15,7 +15,7 @@ CXXFLAGS := $(filter-out -fno-lto,$(CXXFLAGS))
 CXXFLAGS += -flto
 endif
 
-all: exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_main exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_FastKMV exe_test_BinDash exe_test_TopLProbMinHash exe_eval_sketch_acc
+all: rabbitsketch exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_FastKMV exe_test_BinDash exe_test_TopLProbMinHash exe_eval_sketch_acc
 
 exe_test_HLL: test_HLL.cpp
 	$(CXX) $(CXXFLAGS) test_HLL.cpp -o exe_test_HLL $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
@@ -32,8 +32,24 @@ exe_test_MinHash: test_MinHash.cpp
 exe_test_OMH: test_OMH.cpp
 	$(CXX) $(CXXFLAGS) test_OMH.cpp -o exe_test_OMH $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
-exe_main: main.cpp
-	$(CXX) $(CXXFLAGS) main.cpp -o exe_main $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+RABBIT_SRCS=../src/probmh.cpp ../src/fastkmv.cpp ../src/BinDash.cpp ../src/SetSketch.cpp
+
+# The pre-built static library was compiled against a newer libstdc++
+# (uses std::__throw_bad_array_new_length, a C++17+ symbol not present
+# in older system libstdc++).  If your system g++/libstdc++ is too old, point
+# CONDA_LIB at a newer libstdc++ at build time, e.g.
+#     make rabbitsketch CONDA_LIB=$CONDA_PREFIX/lib
+# By default we use $CONDA_PREFIX/lib if available, otherwise no extra runpath
+# (compiler/linker defaults are used).
+CONDA_LIB ?= $(if $(CONDA_PREFIX),$(CONDA_PREFIX)/lib,)
+ifneq ($(strip $(CONDA_LIB)),)
+EXTRA_LDFLAGS=-L$(CONDA_LIB) -Wl,-rpath,$(CONDA_LIB)
+else
+EXTRA_LDFLAGS=
+endif
+
+rabbitsketch: main.cpp $(RABBIT_SRCS) ../src/InvertedIndex.h
+	$(CXX) $(CXXFLAGS) main.cpp $(RABBIT_SRCS) -o rabbitsketch $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_ProbMinHash: test_ProbMinHash.cpp ../src/probmh.cpp ../src/InvertedIndex.h
 	$(CXX) $(CXXFLAGS) test_ProbMinHash.cpp ../src/probmh.cpp -o exe_test_ProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
@@ -57,4 +73,4 @@ exe_test_BinDash: test_BinDash.cpp ../src/BinDash.cpp ../src/InvertedIndex.h
 	$(CXX) $(CXXFLAGS) test_BinDash.cpp ../src/BinDash.cpp -o exe_test_BinDash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
 clean:
-	rm -f *.o exe_*
+	rm -f *.o exe_* rabbitsketch
