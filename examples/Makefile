@@ -32,7 +32,8 @@ exe_test_MinHash: test_MinHash.cpp
 exe_test_OMH: test_OMH.cpp
 	$(CXX) $(CXXFLAGS) test_OMH.cpp -o exe_test_OMH $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
 
-RABBIT_SRCS=../src/probmh.cpp ../src/fastkmv.cpp ../src/BinDash.cpp ../src/SetSketch.cpp
+RABBIT_SRCS=../src/probmh.cpp ../src/fastkmv.cpp ../src/BinDash.cpp ../src/SetSketch.cpp ../src/shuffle.cpp
+RABBIT_CLI_SRCS=main.cpp sub_command.cpp
 
 # The pre-built static library was compiled against a newer libstdc++
 # (uses std::__throw_bad_array_new_length, a C++17+ symbol not present
@@ -48,8 +49,8 @@ else
 EXTRA_LDFLAGS=
 endif
 
-rabbitsketch: main.cpp $(RABBIT_SRCS) ../src/InvertedIndex.h
-	$(CXX) $(CXXFLAGS) main.cpp $(RABBIT_SRCS) -o rabbitsketch $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
+rabbitsketch: $(RABBIT_CLI_SRCS) sub_command.h $(RABBIT_SRCS) ../src/InvertedIndex.h
+	$(CXX) $(CXXFLAGS) $(RABBIT_CLI_SRCS) $(RABBIT_SRCS) -o rabbitsketch $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_ProbMinHash: test_ProbMinHash.cpp ../src/probmh.cpp ../src/InvertedIndex.h
 	$(CXX) $(CXXFLAGS) test_ProbMinHash.cpp ../src/probmh.cpp -o exe_test_ProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
