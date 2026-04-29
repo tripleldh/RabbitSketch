@@ -221,6 +221,14 @@ namespace Sketch{
       /// Materialize the hash list now (call before any parallel read).
       void finalize() { ensureHeapToListed(); }
 
+      /// Returns the finalized bottom-k sorted hash list for inverted-index use.
+      /// Calls finalize() internally; result is valid until the sketch is modified.
+      /// The returned reference points into the internal Reference struct — zero copy.
+      const std::vector<uint64_t>& getHashesSorted() {
+          ensureHeapToListed();
+          return reference.hashesSorted.hashes64;
+      }
+
       /// test whether this minhash is empty
       bool isEmpty() { 
         ensureHeapToListed();
@@ -818,7 +826,27 @@ namespace Sketch{
   class HyperLogLog{
 
     public:
-      HyperLogLog(int np):core_(1uL<<np,0),np_(np),is_calculated_(0),estim_(EstimationMethod::ERTL_MLE),jestim_(JointEstimationMethod::ERTL_JOINT_MLE) {};
+      HyperLogLog(int np)
+        : core_(1uL<<np,0),
+          np_(np),
+          is_calculated_(0),
+          estim_(EstimationMethod::ERTL_MLE),
+          jestim_(JointEstimationMethod::ERTL_JOINT_MLE),
+          track_witnesses_(false) {}
+
+      // Witness-tracking constructor: when true, every register update also
+      // records the 64-bit hash of the k-mer that "won" the register.
+      // Used by the inverted-index --hll path (mirrors SetSketch witnesses).
+      // Memory cost: 8 * (1 << np) extra bytes per sketch.
+      HyperLogLog(int np, bool track_witnesses)
+        : core_(1uL<<np,0),
+          witnesses_(track_witnesses ? (1uL<<np) : 0, 0),
+          np_(np),
+          is_calculated_(0),
+          estim_(EstimationMethod::ERTL_MLE),
+          jestim_(JointEstimationMethod::ERTL_JOINT_MLE),
+          track_witnesses_(track_witnesses) {}
+
       ~HyperLogLog(){};
       void update(char* seq);
       HyperLogLog merge(const HyperLogLog &other) const;
@@ -830,6 +858,12 @@ namespace Sketch{
       double cardinality() const { return creport(); }
       /// Raw register array. Used by external LSH banding.
       const std::vector<uint8_t>& getCore() const { return core_; }
+      /// Per-register "winning" k-mer hash – only populated when constructed
+      /// with track_witnesses=true. Used by inverted-index --index mode as
+      /// high-entropy candidate keys (mirrors SetSketch witnesses).
+      /// Returns an empty vector when witnesses are not being tracked.
+      const std::vector<uint64_t>& getWitnesses() const { return witnesses_; }
+      bool tracksWitnesses() const { return track_witnesses_; }
 
       /// Fraction of registers whose values are identical in both sketches.
       /// Computed with SIMD (AVX-512BW / AVX2 / scalar fallback).
@@ -858,12 +892,14 @@ namespace Sketch{
       double ani(const HyperLogLog& other, int kmer_size = 32) const;
 
     protected:
-      std::vector<uint8_t> core_;//sketchInfo; 
+      std::vector<uint8_t>  core_;//sketchInfo; 
+      std::vector<uint64_t> witnesses_;          // populated only when track_witnesses_
       mutable double value_; //cardinality
       uint32_t np_; // 10-20
       mutable uint8_t is_calculated_;
       EstimationMethod                        estim_;
       JointEstimationMethod                  jestim_;
+      bool                                   track_witnesses_;
       //HashStruct                                 hf_;
 
     private:

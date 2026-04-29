@@ -18,6 +18,8 @@
 #include "common.h"
 
 #include <omp.h>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <climits>
@@ -26,6 +28,7 @@
 #include <iostream>
 #include <algorithm>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace Sketch {
 
@@ -186,7 +189,7 @@ void computeDistances(
         finalPath += "res.dist";
     }
 
-    FILE* fout = fopen(finalPath.c_str(), "w");
+    FILE* fout = std::fopen(finalPath.c_str(), "w");
     if (!fout) {
         std::cerr << "ERROR: cannot open output file: " << finalPath << std::endl;
         return;
@@ -199,8 +202,13 @@ void computeDistances(
 
     #pragma omp parallel num_threads(nThreads)
     {
-        std::vector<int> isect(N, 0);
-        std::vector<int> stamp(N, 0);
+        // uint16_t isect: max common ≤ min(s_i, s_j) ≤ K (sketch size).
+        // FastKMV / ProbMinHash default K = 1024; SetSketch witnessesPerSketch
+        // = m/4 = 1024 for ssBits=13.  Halving the per-thread footprint
+        // (vs int) doubles L2 cache density for random-write hot path and
+        // is the largest single contributor to perf scaling vs N.
+        std::vector<uint16_t> isect(N, 0);
+        std::vector<int>      stamp(N, 0);
         int ep = 0;
         std::vector<int> cand;
         cand.reserve(4096);
@@ -238,7 +246,7 @@ void computeDistances(
                         isect[j] = 1;
                         cand.push_back(j);
                     } else {
-                        isect[j]++;
+                        ++isect[j];
                     }
                 }
             }
@@ -272,7 +280,7 @@ void computeDistances(
 
             if (buf.size() > (1 << 24)) {
                 #pragma omp critical
-                { fwrite(buf.data(), 1, buf.size(), fout); }
+                { std::fwrite(buf.data(), 1, buf.size(), fout); }
                 buf.clear();
             }
             if (i % progress == 0)
@@ -280,10 +288,10 @@ void computeDistances(
         }
         if (!buf.empty()) {
             #pragma omp critical
-            { fwrite(buf.data(), 1, buf.size(), fout); }
+            { std::fwrite(buf.data(), 1, buf.size(), fout); }
         }
     }
-    fclose(fout);
+    std::fclose(fout);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,7 +330,7 @@ void computeDistancesExact(
         finalPath += "res.dist";
     }
 
-    FILE* fout = fopen(finalPath.c_str(), "w");
+    FILE* fout = std::fopen(finalPath.c_str(), "w");
     if (!fout) {
         std::cerr << "ERROR: cannot open output file: " << finalPath << std::endl;
         return;
@@ -335,8 +343,11 @@ void computeDistancesExact(
 
     #pragma omp parallel num_threads(nThreads)
     {
-        std::vector<int> isect(N, 0);
-        std::vector<int> stamp(N, 0);
+        // uint16_t isect: same rationale as in computeDistances() —
+        // SetSketch witnessesPerSketch defaults to 1024 (m/4 with ssBits=13),
+        // safely fits in uint16_t and halves the per-thread footprint.
+        std::vector<uint16_t> isect(N, 0);
+        std::vector<int>      stamp(N, 0);
         int ep = 0;
         std::vector<int> cand;
         cand.reserve(4096);
@@ -374,7 +385,7 @@ void computeDistancesExact(
                         isect[j] = 1;
                         cand.push_back(j);
                     } else {
-                        isect[j]++;
+                        ++isect[j];
                     }
                 }
             }
@@ -402,7 +413,7 @@ void computeDistancesExact(
 
             if (buf.size() > (1 << 24)) {
                 #pragma omp critical
-                { fwrite(buf.data(), 1, buf.size(), fout); }
+                { std::fwrite(buf.data(), 1, buf.size(), fout); }
                 buf.clear();
             }
             if (i % progress == 0)
@@ -410,10 +421,10 @@ void computeDistancesExact(
         }
         if (!buf.empty()) {
             #pragma omp critical
-            { fwrite(buf.data(), 1, buf.size(), fout); }
+            { std::fwrite(buf.data(), 1, buf.size(), fout); }
         }
     }
-    fclose(fout);
+    std::fclose(fout);
 }
 
 } // namespace Sketch

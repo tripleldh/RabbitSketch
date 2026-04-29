@@ -1,185 +1,160 @@
-#include "Sketch.h"
-//#include <iostream>
-#include <sys/time.h>
-#include <zlib.h>
-#include "kseq.h"
-#include <vector>
-#include <math.h>
-#include <random>
-//#include <sstream>
-#include <fstream>
-#include <err.h>
-#include <sys/stat.h>
-#include <omp.h>
-#include <sstream>
-#include "common.h"
-using namespace std;
+/**
+ * test_MinHash – MinHash all-to-all via inverted index.
+ *
+ * Bottom-k hash values are directly the inverted-index keys; every hash is
+ * a unique k-mer id so no stride/subsampling is needed (unlike HLL witnesses).
+ *
+ *   1. Build sketches in parallel; per-thread phmap accumulates the index
+ *      simultaneously (no separate indexing pass).
+ *   2. 64-shard merge + singleton removal → flat CSR inverted index.
+ *   3. computeDistances() walks posting lists with stamp/epoch counting,
+ *      applying minCommon pruning before verifying with set-Jaccard.
+ *   4. Mash distance output: -log(2J/(1+J)) / k.
+ *
+ * Usage:
+ *   exe_test_MinHash <file_list> <dist_threshold> <threads> [output_file]
+ */
 
-typedef struct fileInfo
-{
-	string fileName;
-} fileInfo_t;
+#include "Sketch.h"
+#include "InvertedIndex.h"
+#include "common.h"
+#include "kseq.h"
+#include "phmap.h"
+
+#include <zlib.h>
+#include <sys/time.h>
+#include <sys/stat.h>
+#include <err.h>
+#include <omp.h>
+
+#include <vector>
+#include <string>
+#include <fstream>
+#include <iostream>
+#include <cstring>
+#include <cmath>
+#include <cstdint>
+#include <algorithm>
+
+using namespace std;
 
 KSEQ_INIT(gzFile, gzread)
 
-	//  double get_sec(){
-	//    struct timeval tv;
-	//    gettimeofday(&tv, NULL);
-	//    return tv.tv_sec + (double)tv.tv_usec/1000000;
-	//  }
-
-
 int main(int argc, char* argv[])
 {
-	if(argc < 4){
-		cerr << "run as: " << argv[0] << " bac.txt threshold threads" << endl;
-		return 1;
-	}
-	Sketch::sketchInfo_t info;
-	string inputFile = argv[1];
-	double thres = stod(argv[2]);
-	int numThreads = stoi(argv[3]);
-	ifstream fs(inputFile);
-	if(!fs){
-		err(errno, "cannot open the inputFile: %s\n", inputFile.c_str());
-	}
-	vector<fileInfo_t> fileList;
-	uint64_t totalSize = 0;
-	string fileName;
-	//vector<string> fileArr;
+    if (argc < 4) {
+        cerr << "usage: " << argv[0]
+             << " <file_list> <dist_threshold> <threads> [output_file]" << endl;
+        return 1;
+    }
+    const string inputFile = argv[1];
+    const double thres     = stod(argv[2]);
+    int          nThreads  = stoi(argv[3]);
+    if (nThreads < 1) nThreads = 1;
+    string outPath = "res_dir/res.dist.MinHash";
+    if (argc >= 5) outPath = argv[4];
 
-	while (std::getline(fs, fileName)) {
-		struct stat cur_stat;
-		if (stat(fileName.c_str(), &cur_stat) != 0) {
-			std::cerr << "err" << fileName << std::endl;
-			continue;
-		}
-		uint64_t curSize = cur_stat.st_size;
-		totalSize += curSize;
-		fileInfo_t tmpF;
-		tmpF.fileName = fileName;
-		fileList.push_back(tmpF);
-	}
-	fs.close();
-	int small_file_number = fileList.size();
-	int process_bar_size = get_progress_bar_size(small_file_number); 
+    static const int  KMER_SIZE   = 21;
+    static const int  SKETCH_SIZE = 1000;
+    static const uint32_t SEED    = 42;
 
-	double t1 = get_sec();
-	
-  //method1
-  vector<Sketch::MinHash*> vmh;
-  //method2
-  //vector<Sketch::MashLite> vmh;
-	cerr << "=====total small files: " << small_file_number << endl;
-	vector<string> resFileName;
+    ifstream fs(inputFile);
+    if (!fs) err(errno, "cannot open %s", inputFile.c_str());
+    vector<string> fileList;
+    { string line; while (getline(fs, line)) if (!line.empty()) fileList.push_back(line); }
+    const int N = static_cast<int>(fileList.size());
+    cerr << "===== total files: " << N << " (MinHash inverted-index)" << endl;
+    cerr << "kmerSize=" << KMER_SIZE << "  sketchSize=" << SKETCH_SIZE << endl;
 
-#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
-	for(size_t t = 0; t < small_file_number; t++)
-	{
-		std::vector<uint64_t> hashList64;
-    gzFile fp1;
-		kseq_t * ks1;
-		fp1 = gzopen(fileList[t].fileName.c_str(), "r");
-		if(fp1 == NULL){
-			err(errno, "cannot open the genome file: %s\n", fileList[t].fileName.c_str());
-		}
-		ks1 = kseq_init(fp1);
+    // ── Phase 1: sketch + per-thread local inverted index ─────────────────
+    vector<int>                   sketchSizes(N);
+    vector<vector<uint64_t>>      skKeys(N);
 
-		Sketch::MinHash * mh1 = new Sketch::MinHash();
-		mh1->fileName = fileList[t].fileName;
-		//		mh1->id = t;
-		while(1){
-			int length = kseq_read(ks1);
-			if(length < 0){
-				break;
-			}
-			mh1->update(ks1->seq.s);	
-		}//end while, read the file
+    const int actualThreads = min(nThreads, N);
+    vector<phmap::flat_hash_map<uint64_t, vector<uint32_t>>> threadIdx(actualThreads);
 
-#pragma omp critical
-		{ 
-      //method1
-      vmh.push_back(mh1);
-			resFileName.push_back(fileList[t].fileName);
-			//method2
-      //hashList64 = mh1->storeMinHashes();
-      //Sketch::MashLite lite = mh1->toLite(hashList64);
-      //vmh.push_back(lite);
-		}
-		// NOTE: do NOT delete mh1 here; vmh holds the pointer and it is
-		// used during the pairwise distance loop below.
-		gzclose(fp1);
-		kseq_destroy(ks1);
-	}
+    double t0 = get_sec();
+    #pragma omp parallel num_threads(nThreads)
+    {
+        int tid = omp_get_thread_num();
+        auto& localIdx = (tid < actualThreads) ? threadIdx[tid] : threadIdx[0];
 
-	double t2 = get_sec();
-	cerr << "sketch time is: " << t2 - t1 << endl;
-	vector<string> thread_bufs(numThreads);
-		
-		cerr << "vmh size is: " << vmh.size() << endl;
+        #pragma omp for schedule(dynamic)
+        for (int t = 0; t < N; ++t) {
+            gzFile fp = gzopen(fileList[t].c_str(), "r");
+            if (!fp) continue;
+            kseq_t* ks = kseq_init(fp);
 
-		// Finalize all sketches single-threadedly before parallel reads.
-		// heapToList() is NOT thread-safe; calling finalize() here ensures
-		// needToList==false for every sketch so the parallel loop below only
-		// reads from hashesSorted and never calls heapToList() concurrently.
-		for(int i = 0; i < (int)vmh.size(); i++){
-			vmh[i]->finalize();
-		}
+            Sketch::MinHash sk(KMER_SIZE, SKETCH_SIZE, SEED, /*rc=*/true);
+            while (kseq_read(ks) >= 0) sk.update(ks->seq.s);
+            kseq_destroy(ks);
+            gzclose(fp);
 
-		#pragma omp parallel for num_threads(numThreads) schedule(dynamic)
-		for(int i = 0; i < (int)vmh.size(); i++){
-				int tid = omp_get_thread_num();
-				for(int j = i+1; j < (int)vmh.size(); j++){
-					double dist = vmh[i]->distance(vmh[j]);
-					if(dist < thres){
-						char line[4096];
-						int len = snprintf(line, sizeof(line), "%s\t%s\t%f\n",
-						                   resFileName[i].c_str(), resFileName[j].c_str(), dist);
-						thread_bufs[tid].append(line, len);
-					}
-				}
-			}
+            // getHashesSorted() calls finalize() internally.
+            const auto& hashes = sk.getHashesSorted();
+            const int sz = static_cast<int>(hashes.size());
+            sketchSizes[t] = sz;
+            skKeys[t].resize(sz);
+            for (int i = 0; i < sz; ++i) {
+                skKeys[t][i] = hashes[i];
+                localIdx[hashes[i]].push_back(static_cast<uint32_t>(t));
+            }
+        }
+    }
+    double t1 = get_sec();
+    cerr << "sketch + local index: " << t1 - t0 << " s" << endl;
 
-		system("mkdir -p res_dir");
-		FILE* fp_out = fopen("res_dir/res.dist.MinHash", "w");
-		for(int t = 0; t < numThreads; t++)
-			fwrite(thread_bufs[t].data(), 1, thread_bufs[t].size(), fp_out);
-		fclose(fp_out);
+    // ── Phase 2: 64-shard merge + CSR build ───────────────────────────────
+    auto csrIdx = Sketch::buildCSRIndex<uint64_t>(threadIdx, nThreads);
+    double t2 = get_sec();
+    cerr << "build CSR index: " << t2 - t1 << " s" << endl;
 
-		for(int i = 0; i < (int)vmh.size(); i++){
-			delete vmh[i];
-		}
-		vmh.clear();
-	
-		double t3 = get_sec();
-		cerr << "dist time is: " << t3 - t2 << endl;
+    // ── Pruning thresholds ─────────────────────────────────────────────────
+    const double p_exp  = exp(-static_cast<double>(KMER_SIZE) * thres);
+    const double minJac = p_exp / (2.0 - p_exp);
+    const int minCommon = max(1,
+        static_cast<int>(ceil(minJac * static_cast<double>(SKETCH_SIZE))));
+    cerr << "pruning: minCommon=" << minCommon << "/" << SKETCH_SIZE
+         << "  (minJac=" << minJac << ", mashD<" << thres
+         << ", k=" << KMER_SIZE << ")" << endl;
 
-	//Method 2
-	//index dictionary for large scale genome similarity analysis
+    // ── Phase 3: posting-list traversal + exact verification ──────────────
+    // Exact union-K Jaccard: replicate MinHash::jaccard() union-K merge.
+    // Early-exit every 32 steps: if c + min(remaining_A, remaining_B) < minCommon,
+    // can never pass threshold → abort merge.
+    const int K = SKETCH_SIZE;
+    const int mc = minCommon;
+    auto exactJaccardFn = [&, K_cap = K, mc_cap = mc](int i, int j) -> double {
+        const auto& hi = skKeys[i];
+        const auto& hj = skKeys[j];
+        const int si = (int)hi.size(), sj = (int)hj.size();
+        int ii = 0, jj = 0, c = 0, denom = 0;
+        while (denom < K_cap && ii < si && jj < sj) {
+            if      (hi[ii] < hj[jj]) { ii++; }
+            else if (hi[ii] > hj[jj]) { jj++; }
+            else                      { c++; ii++; jj++; }
+            denom++;
+            if (__builtin_expect((denom & 31) == 0, 0) &&
+                c + std::min(si - ii, sj - jj) < mc_cap) return 0.0;
+        }
+        if (denom < K_cap) {
+            denom += (si - ii) + (sj - jj);
+            if (denom > K_cap) denom = K_cap;
+        }
+        return (denom <= 0) ? 0.0 : (double)c / denom;
+    };
+    auto minCommonFn = [minCommon](int) { return minCommon; };
 
+    {
+        struct stat st;
+        if (stat("res_dir", &st) != 0) system("mkdir -p res_dir");
+    }
 
-
-	//std::string outputFile = "100.sketch";
-	//info.genomeNumber = vmh.size();
-	//std::cout << "sketch num: " << vmh.size() << std::endl;
-
-	//Sketch::saveMinHashes(vmh, info, "100.sketch"); 
-	//std::cerr << "save sketches to : 100.sketch" << std::endl;
-
-	//double tstart = get_sec();
-	//std::string dictFile = outputFile + ".dict";
-	//std::string indexFile = outputFile + ".index";
-	//transMinHashes(vmh, info, dictFile, indexFile,numThreads); 
-	//double tend = get_sec();
-	//std::cerr << "=============== transSketches time: " << tend - tstart << " s" << std::endl;
-
-	//Sketch::index_tridist_MinHash(vmh, info, "100.sketch", "100.sketch.dist", 21, thres, 0, numThreads);
-
-
-	//double t3 = get_sec();
-	//cerr << "dist time is: " << t3 - tend << endl;
-	return 0;
+    double t3 = get_sec();
+    Sketch::computeDistancesExact<uint64_t>(csrIdx, skKeys, fileList,
+        N, KMER_SIZE, thres, exactJaccardFn, minCommonFn, outPath, nThreads);
+    double t4 = get_sec();
+    cerr << "dist time: "  << t4 - t3 << " s" << endl;
+    cerr << "total time: " << t4 - t0 << " s" << endl;
+    return 0;
 }
-
-
-

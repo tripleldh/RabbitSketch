@@ -1,206 +1,288 @@
+/**
+ * test_HLL – HyperLogLog all-to-all with inverted-index witness candidates.
+ *
+ * REPLACES the previous LSH band-streaming implementation, which suffered
+ * from MAX_BUCKET skips (false negatives) and slow O(B²) candidate explosion
+ * inside large buckets. The new approach mirrors test_SetSketch.cpp:
+ *
+ *   1. Each HyperLogLog is constructed with witness tracking enabled. Every
+ *      register update also records the 64-bit hash that "won" the register
+ *      (the k-mer with the longest leading-zero run for that bucket).
+ *   2. Subsample witnesses with WITNESS_STRIDE=4 (one per 4 registers).
+ *      For bits=13 → 2048 witness keys per sketch (similar to FastKMV K).
+ *      Two sketches sharing a register-i witness ⇒ shared k-mer ∈ A∩B,
+ *      so witness-overlap is a high-quality candidate generator.
+ *   3. Sort by cardinality descending so the size-ratio bound becomes a
+ *      `break` instead of `continue` in any inner loop.
+ *   4. Build a CSR inverted index over witness hashes, singleton-filter,
+ *      then verify each candidate with HyperLogLog::distance() (Ertl joint MLE).
+ *
+ *   Mode A (expectedOverlap >= 20)  → inverted index + exact verify.
+ *   Mode B (otherwise)              → in-memory O(N²) all-pairs over the
+ *                                     same already-built HLL vector with
+ *                                     size-ratio break-pruning.
+ *
+ * Usage:
+ *   exe_test_HLL <file_list> <dist_threshold> <threads> [output_file]
+ *
+ * Output (matches old test_HLL output schema):
+ *   res_dir/res.dist.HLL    or [output_file] if given
+ *   format:    file_a \t file_b \t mash_distance
+ */
+
 #include "Sketch.h"
-#include <sys/time.h>
-#include <zlib.h>
-#include "kseq.h"
-#include <vector>
-#include <cmath>
-#include <fstream>
-#include <err.h>
-#include <sys/stat.h>
-#include <omp.h>
-#include <atomic>
-#include <algorithm>
-#include <cstring>
+#include "InvertedIndex.h"
 #include "common.h"
-#include "robin_hood.h"
+#include "kseq.h"
+#include "phmap.h"
+
+#include <zlib.h>
+#include <sys/time.h>
+#include <sys/stat.h>
+#include <err.h>
+#include <omp.h>
+
+#include <vector>
+#include <string>
+#include <fstream>
+#include <iostream>
+#include <cstring>
+#include <cmath>
+#include <cstdint>
+#include <algorithm>
+#include <numeric>
+#include <memory>
+
 using namespace std;
 
 KSEQ_INIT(gzFile, gzread)
 
+// HLL gives Jaccard, mash distance is derived (k-mer size hard-coded as in
+// the original test_HLL: HLL update() uses KMERLEN=32 internally).
+static inline double mash_distance_from_jaccard(double jaccard, int kmerSize) {
+    if (jaccard <= 0.0) return 1.0;
+    if (jaccard >= 1.0) return 0.0;
+    const double p = (2.0 * jaccard) / (1.0 + jaccard);
+    return (p > 0.0) ? (-std::log(p) / static_cast<double>(kmerSize)) : 1.0;
+}
+
+static inline double min_jaccard_from_mash_distance(double mashDist, int kmerSize) {
+    if (mashDist <= 0.0) return 1.0;
+    const double p = std::exp(-mashDist * static_cast<double>(kmerSize));
+    const double denom = 2.0 - p;
+    if (denom <= 0.0) return 1.0;
+    double j = p / denom;
+    if (j < 0.0) j = 0.0;
+    if (j > 1.0) j = 1.0;
+    return j;
+}
 
 int main(int argc, char* argv[])
 {
-  if (argc < 4) {
-    cerr << "usage: " << argv[0]
-         << " <file_list> <dist_threshold> <threads> [max_bucket=500]" << endl;
-    return 1;
-  }
-  string inputFile = argv[1];
-  double thres     = stod(argv[2]);
-  int numThreads   = stoi(argv[3]);
-  if (numThreads < 1) numThreads = 1;
-  int MAX_BUCKET   = (argc >= 5) ? stoi(argv[4]) : 500;
-
-  ifstream fs(inputFile);
-  if (!fs) err(errno, "cannot open %s", inputFile.c_str());
-
-  vector<string> fileArr;
-  { string line; while (getline(fs, line)) fileArr.push_back(line); }
-  const int n = (int)fileArr.size();
-  cerr << "===== total files: " << n << " (HyperLogLog, optimized)" << endl;
-
-  // ── Phase 0: pre-allocate sketches ──────────────────────────────────────────
-  static const int BITS = 13;
-  vector<Sketch::HyperLogLog> vhlog;
-  vhlog.reserve(n);
-  for (int i = 0; i < n; i++)
-    vhlog.emplace_back(BITS);
-
-  // ── Phase 1: parallel sketch construction (no critical section) ─────────────
-  double t1 = get_sec();
-
-  #pragma omp parallel for num_threads(numThreads) schedule(dynamic)
-  for (int t = 0; t < n; t++) {
-    gzFile fp1 = gzopen(fileArr[t].c_str(), "r");
-    if (fp1 == NULL) continue;
-    kseq_t* ks1 = kseq_init(fp1);
-    while (kseq_read(ks1) >= 0)
-      vhlog[t].update(ks1->seq.s);
-    kseq_destroy(ks1);
-    gzclose(fp1);
-  }
-
-  double t2 = get_sec();
-  cerr << "sketch time is: " << t2 - t1 << endl;
-
-  // ── Phase 2: extract flat core array + cardinalities ────────────────────────
-  const int m = (n > 0) ? (int)vhlog[0].getCore().size() : 0;
-  vector<double> sizes(n);
-  vector<uint8_t> flat_cores((size_t)n * m);
-
-  #pragma omp parallel for num_threads(numThreads) schedule(static)
-  for (int i = 0; i < n; i++) {
-    sizes[i] = vhlog[i].cardinality();
-    memcpy(&flat_cores[(size_t)i * m], vhlog[i].getCore().data(), m);
-  }
-  double t_phase1 = get_sec();
-  cerr << "  Phase 1 cardinality + flatten (parallel): " << t_phase1 - t2 << " s" << endl;
-
-  // ── Phase 3–5: Band-streaming LSH + inline verification ───────────────────
-  const int BANDS = 128;
-  const int ROWS  = (m > 0) ? m / BANDS : 8;
-  const double min_jaccard = 1.0 - thres;
-
-  auto band_hash = [](const uint8_t* data, int len) -> uint32_t {
-    uint32_t h = 2166136261u;
-    for (int i = 0; i < len; i++) { h ^= data[i]; h *= 16777619u; }
-    return h;
-  };
-
-  vector<string> thread_bufs(numThreads);
-
-  constexpr int NUM_PARTS = 256;
-  struct alignas(64) DedupPart {
-    robin_hood::unordered_set<uint64_t> set;
-    omp_lock_t lock;
-  };
-  vector<DedupPart> dedup(NUM_PARTS);
-  for (auto& d : dedup) omp_init_lock(&d.lock);
-
-  auto pair_key = [](int i, int j) -> uint64_t {
-    return ((uint64_t)(unsigned)i << 32) | (unsigned)j;
-  };
-  auto try_insert = [&](int i, int j) -> bool {
-    uint64_t k = pair_key(i, j);
-    int part = (int)((k * 0x9E3779B97F4A7C15ULL) >> 56) & (NUM_PARTS - 1);
-    omp_set_lock(&dedup[part].lock);
-    bool inserted = dedup[part].set.insert(k).second;
-    omp_unset_lock(&dedup[part].lock);
-    return inserted;
-  };
-
-  atomic<long long> cnt_size_filtered{0};
-  atomic<long long> cnt_exact{0};
-  long long skipped_buckets = 0;
-
-  double t_lsh_start = get_sec();
-
-  for (int b = 0; b < BANDS; b++) {
-    robin_hood::unordered_map<uint32_t, vector<int>> bkt;
-    bkt.reserve((size_t)n);
-    for (int i = 0; i < n; i++) {
-      uint32_t h = band_hash(flat_cores.data() + (size_t)i * m + b * ROWS, ROWS);
-      bkt[h].push_back(i);
+    if (argc < 4) {
+        cerr << "usage: " << argv[0]
+             << " <file_list> <dist_threshold> <threads> [output_file]" << endl;
+        return 1;
     }
+    const string inputFile = argv[1];
+    const double thres     = stod(argv[2]);
+    int          nThreads  = stoi(argv[3]);
+    if (nThreads < 1) nThreads = 1;
 
-    vector<pair<int,int>> new_pairs;
-    for (auto& [key, ids] : bkt) {
-      int sz = (int)ids.size();
-      if (sz < 2) continue;
-      if (sz > MAX_BUCKET) { skipped_buckets++; continue; }
-      for (int a = 0; a < sz; a++)
-        for (int c = a + 1; c < sz; c++) {
-          int ii = min(ids[a], ids[c]), jj = max(ids[a], ids[c]);
-          double si = sizes[ii], sj = sizes[jj];
-          if (si <= 0 || sj <= 0) continue;
-          if (min(si, sj) / max(si, sj) < min_jaccard * 0.93) {
-            cnt_size_filtered++;
-            continue;
-          }
-          new_pairs.emplace_back(ii, jj);
+    string outPath = "res_dir/res.dist.HLL";
+    if (argc >= 5) outPath = argv[4];
+
+    // The HLL update() encodes 32-mers; mash distance and pruning use this k.
+    static const int KMER_SIZE = 32;
+    static const int BITS      = 13;
+    static const int M         = 1 << BITS;
+
+    static const int WITNESS_STRIDE = 4;
+    const int witnessesPerSketch = M / WITNESS_STRIDE;
+
+    ifstream fs(inputFile);
+    if (!fs) err(errno, "cannot open %s", inputFile.c_str());
+    vector<string> fileList;
+    { string line; while (getline(fs, line)) if (!line.empty()) fileList.push_back(line); }
+    const int N = static_cast<int>(fileList.size());
+    cerr << "===== total files: " << N << " (HyperLogLog, inverted-index)" << endl;
+    cerr << "registers=" << M << "  witnessStride=" << WITNESS_STRIDE
+         << "  witnessKeys=" << witnessesPerSketch
+         << "  bits=" << BITS << endl;
+
+    // ── Phase 1: parallel sketch + witness extraction ──────────────────────
+    vector<unique_ptr<Sketch::HyperLogLog>> vhll(N);
+    vector<double>           sizes(N, 0.0);
+    vector<vector<uint64_t>> skKeys(N);
+
+    double t0 = get_sec();
+    #pragma omp parallel for num_threads(nThreads) schedule(dynamic)
+    for (int t = 0; t < N; ++t) {
+        auto sk = std::make_unique<Sketch::HyperLogLog>(BITS, /*track_witnesses=*/true);
+        gzFile fp = gzopen(fileList[t].c_str(), "r");
+        if (!fp) { vhll[t] = std::move(sk); continue; }
+        kseq_t* ks = kseq_init(fp);
+        while (kseq_read(ks) >= 0) sk->update(ks->seq.s);
+        kseq_destroy(ks);
+        gzclose(fp);
+
+        sizes[t] = sk->cardinality();
+        const uint64_t* wit = sk->getWitnesses().data();
+        skKeys[t].reserve(witnessesPerSketch);
+        for (int p = 0; p < M; p += WITNESS_STRIDE)
+            if (wit[p] != 0) skKeys[t].push_back(wit[p]);
+
+        vhll[t] = std::move(sk);
+    }
+    double t1 = get_sec();
+    cerr << "sketch + witness extract time: " << t1 - t0 << " s" << endl;
+
+    // ── Sort by cardinality descending + reorder all per-genome arrays ─────
+    {
+        vector<int> order(N);
+        iota(order.begin(), order.end(), 0);
+        sort(order.begin(), order.end(),
+             [&](int a, int b) { return sizes[a] > sizes[b]; });
+
+        vector<unique_ptr<Sketch::HyperLogLog>> sH(N);
+        vector<string>                          sF(N);
+        vector<double>                          sS(N, 0.0);
+        vector<vector<uint64_t>>                sK(N);
+        for (int ni = 0; ni < N; ++ni) {
+            const int oi = order[ni];
+            sH[ni] = std::move(vhll[oi]);
+            sF[ni] = fileList[oi];
+            sS[ni] = sizes[oi];
+            sK[ni] = std::move(skKeys[oi]);
         }
+        vhll.swap(sH);
+        fileList.swap(sF);
+        sizes.swap(sS);
+        skKeys.swap(sK);
     }
 
-    const int np = (int)new_pairs.size();
-    #pragma omp parallel for num_threads(numThreads) schedule(dynamic, 256)
-    for (int c = 0; c < np; c++) {
-      int i = new_pairs[c].first, j = new_pairs[c].second;
-      if (!try_insert(i, j)) continue;
+    // ── Mode decision ───────────────────────────────────────────────────────
+    const double minJac = min_jaccard_from_mash_distance(thres, KMER_SIZE);
+    const double expectedOverlap = static_cast<double>(witnessesPerSketch) * minJac;
+    const bool   useInvIdx = (expectedOverlap >= 20.0);
+    cerr << "minJac=" << minJac
+         << "  expectedWitnessOverlap=" << expectedOverlap
+         << "  mashD<" << thres << "  k=" << KMER_SIZE << endl;
 
-      cnt_exact++;
-      double dist = vhlog[i].distance(vhlog[j]);
-      if (dist < thres) {
-        int tid = omp_get_thread_num();
-        char line[4096];
-        int len = snprintf(line, sizeof(line), "%s\t%s\t%lf\n",
-                           fileArr[i].c_str(), fileArr[j].c_str(), dist);
-        thread_bufs[tid].append(line, len);
-      }
+    // Make the output directory exist if outPath is the default
+    {
+        struct stat st;
+        if (stat("res_dir", &st) != 0) system("mkdir -p res_dir");
     }
-  }
 
-  for (auto& d : dedup) omp_destroy_lock(&d.lock);
-  long long dedup_total = 0;
-  for (auto& d : dedup) dedup_total += (long long)d.set.size();
+    double t5 = get_sec();
 
-  double t_lsh = get_sec();
-  const long long total_pairs = (long long)n * (n - 1) / 2;
-  cerr << "LSH band-streaming done (" << BANDS << " bands):" << endl;
-  cerr << "  unique candidates:  " << dedup_total << " / " << total_pairs
-       << " total pairs (reduction: "
-       << 100.0*(1.0-(double)dedup_total/total_pairs) << "%)" << endl;
-  cerr << "  skipped buckets:    " << skipped_buckets << endl;
-  cerr << "  size-filtered:      " << cnt_size_filtered.load() << endl;
-  cerr << "  exact computed:     " << cnt_exact.load() << endl;
-  cerr << "  LSH + verify time:  " << t_lsh - t_phase1 << " s" << endl;
+    if (useInvIdx) {
+        cerr << "mode: INVERTED INDEX (HLL witness hashes)" << endl;
 
-  // Flush output
-  system("mkdir -p res_dir");
-  FILE* fp_out = fopen("res_dir/res.dist.HLL", "w");
-  for (int t = 0; t < numThreads; t++)
-    fwrite(thread_bufs[t].data(), 1, thread_bufs[t].size(), fp_out);
-  fclose(fp_out);
+        const int actualThreads = min(nThreads, N);
+        vector<phmap::flat_hash_map<uint64_t, vector<uint32_t>>> threadIdx(actualThreads);
 
-  cerr << "total time: " << get_sec() - t1 << " s" << endl;
-  return 0;
+        double ti0 = get_sec();
+        #pragma omp parallel num_threads(nThreads)
+        {
+            int tid = omp_get_thread_num();
+            if (tid < actualThreads) {
+                auto& localIdx = threadIdx[tid];
+                #pragma omp for schedule(static)
+                for (int t = 0; t < N; ++t)
+                    for (uint64_t key : skKeys[t])
+                        localIdx[key].push_back(static_cast<uint32_t>(t));
+            }
+        }
+        double ti1 = get_sec();
+        cerr << "local index: " << ti1 - ti0 << " s" << endl;
+
+        auto csrIdx = Sketch::buildCSRIndex<uint64_t>(threadIdx, nThreads);
+        double ti2 = get_sec();
+        cerr << "CSR build: " << ti2 - ti1 << " s" << endl;
+
+        // Singleton-filter: drop keys present in only one sketch.
+        {
+            size_t kbefore = 0, kafter = 0;
+            #pragma omp parallel for num_threads(nThreads) schedule(dynamic, 64) \
+                                     reduction(+:kbefore,kafter)
+            for (int t = 0; t < N; ++t) {
+                kbefore += skKeys[t].size();
+                vector<uint64_t> kept;
+                kept.reserve(skKeys[t].size() / 5);
+                for (uint64_t key : skKeys[t])
+                    if (csrIdx.postIdx.count(key))
+                        kept.push_back(key);
+                kafter += kept.size();
+                skKeys[t] = std::move(kept);
+            }
+            cerr << "skKeys singleton-filtered: " << kbefore << " -> " << kafter
+                 << " (" << (kbefore > 0 ? 100.0 * kafter / kbefore : 0.0)
+                 << "% retained, freed ~"
+                 << (kbefore - kafter) * 8 / (1 << 20) << " MB)" << endl;
+        }
+
+        const double sd = std::sqrt(std::max(0.0, expectedOverlap * (1.0 - minJac)));
+        const int minCommon = max(1, static_cast<int>(std::floor(expectedOverlap - 8.0 * sd)));
+        cerr << "minCommon=" << minCommon << " (expected=" << expectedOverlap
+             << ", 8sigma=" << 8.0 * sd << ")" << endl;
+
+        auto exactJaccardFn = [&](int i, int j) -> double {
+            const double si = sizes[i], sj = sizes[j];
+            if (si > 0.0 && sj / si < minJac) return -1.0;
+            const double d = vhll[i]->distance(*vhll[j]);
+            return 1.0 - d;
+        };
+        auto minCommonFn = [minCommon](int) { return minCommon; };
+
+        Sketch::computeDistancesExact<uint64_t>(
+            csrIdx, skKeys, fileList,
+            N, KMER_SIZE, thres, exactJaccardFn, minCommonFn,
+            outPath, nThreads);
+
+    } else {
+        // ───────────── MODE B: O(N²) all-pairs over already-built HLLs ─────
+        cerr << "mode: ALL-PAIRS (sorted, size-ratio break-prune)" << endl;
+        { vector<vector<uint64_t>>().swap(skKeys); }
+
+        vector<string> bufs(nThreads);
+        int progress = N / 20;
+        if (progress < 1) progress = 1;
+
+        #pragma omp parallel for num_threads(nThreads) schedule(dynamic, 1)
+        for (int i = 0; i < N; ++i) {
+            const int tid = omp_get_thread_num();
+            string& buf = bufs[tid];
+            const double si = sizes[i];
+            for (int j = i + 1; j < N; ++j) {
+                const double sj = sizes[j];
+                if (si > 0.0 && sj / si < minJac) break;
+
+                const double dist = vhll[i]->distance(*vhll[j]);
+                if (dist < thres) {
+                    char line[1024];
+                    int len = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
+                        fileList[i].c_str(), fileList[j].c_str(), dist);
+                    buf.append(line, static_cast<size_t>(len));
+                }
+            }
+            if (i % progress == 0) {
+                #pragma omp critical
+                cerr << "  dist " << i << " / " << N << endl;
+            }
+        }
+
+        FILE* fp = fopen(outPath.c_str(), "w");
+        if (!fp) err(errno, "cannot open output: %s", outPath.c_str());
+        setvbuf(fp, nullptr, _IOFBF, 1 << 22);
+        for (auto& b : bufs) fwrite(b.data(), 1, b.size(), fp);
+        fclose(fp);
+        cerr << "output: " << outPath << endl;
+    }
+
+    double t6 = get_sec();
+    cerr << "dist time: "  << t6 - t5 << " s" << endl;
+    cerr << "total time: " << get_sec() - t0 << " s" << endl;
+    return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

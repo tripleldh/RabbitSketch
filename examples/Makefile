@@ -17,22 +17,22 @@ endif
 
 all: rabbitsketch exe_test_HLL exe_test_SetSketch exe_test_Kssd exe_test_MinHash exe_test_OMH exe_test_ProbMinHash exe_test_OneProbMinHash exe_test_FastKMV exe_test_BinDash exe_test_TopLProbMinHash exe_eval_sketch_acc
 
-exe_test_HLL: test_HLL.cpp
-	$(CXX) $(CXXFLAGS) test_HLL.cpp -o exe_test_HLL $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+exe_test_HLL: test_HLL.cpp ../src/HyperLogLog.cpp ../src/InvertedIndex.h
+	$(CXX) $(CXXFLAGS) test_HLL.cpp ../src/HyperLogLog.cpp -o exe_test_HLL $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_SetSketch: test_SetSketch.cpp ../src/SetSketch.cpp ../src/InvertedIndex.h
-	$(CXX) $(CXXFLAGS) test_SetSketch.cpp ../src/SetSketch.cpp -o exe_test_SetSketch $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) test_SetSketch.cpp ../src/SetSketch.cpp -o exe_test_SetSketch $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_Kssd: test_Kssd.cpp
-	$(CXX) $(CXXFLAGS) test_Kssd.cpp ../src/shuffle.cpp -o exe_test_Kssd $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static 
+	$(CXX) $(CXXFLAGS) test_Kssd.cpp ../src/shuffle.cpp -o exe_test_Kssd $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
-exe_test_MinHash: test_MinHash.cpp
-	$(CXX) $(CXXFLAGS) test_MinHash.cpp  -o exe_test_MinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+exe_test_MinHash: test_MinHash.cpp ../src/InvertedIndex.h
+	$(CXX) $(CXXFLAGS) test_MinHash.cpp  -o exe_test_MinHash $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_OMH: test_OMH.cpp
-	$(CXX) $(CXXFLAGS) test_OMH.cpp -o exe_test_OMH $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) test_OMH.cpp -o exe_test_OMH $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
-RABBIT_SRCS=../src/probmh.cpp ../src/fastkmv.cpp ../src/BinDash.cpp ../src/SetSketch.cpp ../src/shuffle.cpp
+RABBIT_SRCS=../src/probmh.cpp ../src/fastkmv.cpp ../src/BinDash.cpp ../src/SetSketch.cpp ../src/shuffle.cpp ../src/HyperLogLog.cpp
 RABBIT_CLI_SRCS=main.cpp sub_command.cpp
 
 # The pre-built static library was compiled against a newer libstdc++
@@ -53,25 +53,25 @@ rabbitsketch: $(RABBIT_CLI_SRCS) sub_command.h $(RABBIT_SRCS) ../src/InvertedInd
 	$(CXX) $(CXXFLAGS) $(RABBIT_CLI_SRCS) $(RABBIT_SRCS) -o rabbitsketch $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_ProbMinHash: test_ProbMinHash.cpp ../src/probmh.cpp ../src/InvertedIndex.h
-	$(CXX) $(CXXFLAGS) test_ProbMinHash.cpp ../src/probmh.cpp -o exe_test_ProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) test_ProbMinHash.cpp ../src/probmh.cpp -o exe_test_ProbMinHash $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_OneProbMinHash: test_OneProbMinHash.cpp ../src/probmh_op.cpp
-	$(CXX) $(CXXFLAGS) test_OneProbMinHash.cpp ../src/probmh_op.cpp -o exe_test_OneProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) test_OneProbMinHash.cpp ../src/probmh_op.cpp -o exe_test_OneProbMinHash $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_FastKMV: test_FastKMV.cpp ../src/fastkmv.cpp ../src/InvertedIndex.h
-	$(CXX) $(CXXFLAGS) test_FastKMV.cpp ../src/fastkmv.cpp -o exe_test_FastKMV $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) test_FastKMV.cpp ../src/fastkmv.cpp -o exe_test_FastKMV $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_TopLProbMinHash: test_TopLProbMinHash.cpp ../src/probmh.cpp
-	$(CXX) $(CXXFLAGS) test_TopLProbMinHash.cpp ../src/probmh.cpp -o exe_test_TopLProbMinHash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) test_TopLProbMinHash.cpp ../src/probmh.cpp -o exe_test_TopLProbMinHash $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_eval_sketch_acc: eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp ../src/BinDash.cpp
-	$(CXX) $(CXXFLAGS) eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp ../src/BinDash.cpp -o exe_eval_sketch_acc $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp ../src/BinDash.cpp -o exe_eval_sketch_acc $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_ani_containment: test_ani_containment.cpp ../src/probmh.cpp ../src/fastkmv.cpp
-	$(CXX) $(CXXFLAGS) test_ani_containment.cpp ../src/probmh.cpp ../src/fastkmv.cpp -o exe_test_ani_containment $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) test_ani_containment.cpp ../src/probmh.cpp ../src/fastkmv.cpp -o exe_test_ani_containment $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_test_BinDash: test_BinDash.cpp ../src/BinDash.cpp ../src/InvertedIndex.h
-	$(CXX) $(CXXFLAGS) test_BinDash.cpp ../src/BinDash.cpp -o exe_test_BinDash $(RABBIT_LIBDIRS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) test_BinDash.cpp ../src/BinDash.cpp -o exe_test_BinDash $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 clean:
 	rm -f *.o exe_* rabbitsketch

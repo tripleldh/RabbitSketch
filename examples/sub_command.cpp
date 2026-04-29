@@ -240,6 +240,112 @@ static int run_pair(const Args& a) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  §3b MinHash --index  (mirrors run_index_fastkmv)
+//
+//      Bottom-k hash values are directly the inverted-index keys — no stride
+//      or witness subsampling needed since every hash is a unique k-mer id.
+//
+//      Candidate generation uses minCommon = ceil(minJac × K) calibrated to
+//      the library's union-k Jaccard estimator.  Exact verification runs the
+//      same union-bottom-K merge as MinHash::jaccard() to ensure distances
+//      are byte-identical to the brute-force distance() output.
+// ═══════════════════════════════════════════════════════════════════════════
+static void run_index_minhash(const Args& a, const std::vector<std::string>& files) {
+    const int N = static_cast<int>(files.size());
+    std::vector<int>                   sketchSizes(N);
+    std::vector<std::vector<uint64_t>> skKeys(N);
+
+    const int actualThreads = std::min(a.threads, N);
+    std::vector<phmap::flat_hash_map<uint64_t, std::vector<uint32_t>>> threadIdx(actualThreads);
+
+    double t0 = get_sec();
+    #pragma omp parallel num_threads(a.threads)
+    {
+        int tid = omp_get_thread_num();
+        auto& localIdx = (tid < actualThreads) ? threadIdx[tid] : threadIdx[0];
+
+        #pragma omp for schedule(dynamic)
+        for (int t = 0; t < N; ++t) {
+            gzFile fp = gzopen(files[t].c_str(), "r");
+            if (!fp) continue;
+            kseq_t* ks = kseq_init(fp);
+
+            Sketch::MinHash sk(a.kmerSize, a.minhashSize,
+                               static_cast<uint32_t>(a.seed), /*rc=*/true);
+            while (kseq_read(ks) >= 0) sk.update(ks->seq.s);
+            kseq_destroy(ks);
+            gzclose(fp);
+
+            const auto& hashes = sk.getHashesSorted();   // calls finalize() internally
+            const int sz = static_cast<int>(hashes.size());
+            sketchSizes[t] = sz;
+            skKeys[t].resize(sz);
+            for (int i = 0; i < sz; ++i) {
+                skKeys[t][i] = hashes[i];
+                localIdx[hashes[i]].push_back(static_cast<uint32_t>(t));
+            }
+        }
+    }
+    double t1 = get_sec();
+    std::cerr << "sketch + local index: " << t1 - t0 << " s\n";
+
+    auto csrIdx = Sketch::buildCSRIndex<uint64_t>(threadIdx, a.threads);
+    double t2 = get_sec();
+    std::cerr << "build CSR index: " << t2 - t1 << " s\n";
+
+    // minCommon threshold: calibrated so that c ≥ minCommon implies c' ≥ minJac·K
+    // where c' is the union-K intersection (what jaccard() computes).
+    // Since c ≥ c' always (full intersection ≥ union-K intersection), using the
+    // same threshold ensures no false negatives: if c' ≥ minJac·K then c ≥ c'.
+    const double p_exp  = std::exp(-static_cast<double>(a.kmerSize) * a.maxDist);
+    const double minJac = p_exp / (2.0 - p_exp);
+    const int    minCommon = std::max(1,
+        static_cast<int>(std::ceil(minJac * static_cast<double>(a.minhashSize))));
+    std::cerr << "pruning: minCommon=" << minCommon << "/" << a.minhashSize
+              << "  (minJac=" << minJac << ", mashD<" << a.maxDist
+              << ", k=" << a.kmerSize << ")\n";
+
+    // Exact verification: replicate MinHash::jaccard() union-K merge intersection.
+    // This guarantees distances byte-identical to the brute-force distance() path.
+    //
+    // Early-exit (every 32 steps): if c + min(remaining_A, remaining_B) < minCommon,
+    // the union-K intersection can never reach minCommon → abort merge.  Checking
+    // every 32 steps keeps per-step overhead ~1/32 while still catching borderline
+    // pairs that passed the inverted-index filter but fail exact verification.
+    const int K = a.minhashSize;
+    const int mc = minCommon;
+    auto exactJaccardFn = [&, K_cap = K, mc_cap = mc](int i, int j) -> double {
+        const auto& hi = skKeys[i];
+        const auto& hj = skKeys[j];
+        const int si = static_cast<int>(hi.size());
+        const int sj = static_cast<int>(hj.size());
+        int ii = 0, jj = 0, c = 0, denom = 0;
+        while (denom < K_cap && ii < si && jj < sj) {
+            if      (hi[ii] < hj[jj]) { ii++; }
+            else if (hi[ii] > hj[jj]) { jj++; }
+            else                      { c++; ii++; jj++; }
+            denom++;
+            // Check every 32 steps: abort if impossible to reach minCommon
+            if (__builtin_expect((denom & 31) == 0, 0) &&
+                c + std::min(si - ii, sj - jj) < mc_cap) return 0.0;
+        }
+        if (denom < K_cap) {
+            denom += (si - ii) + (sj - jj);
+            if (denom > K_cap) denom = K_cap;
+        }
+        return (denom <= 0) ? 0.0 : static_cast<double>(c) / denom;
+    };
+    auto minCommonFn = [minCommon](int) { return minCommon; };
+
+    double t3 = get_sec();
+    Sketch::computeDistancesExact<uint64_t>(csrIdx, skKeys, files,
+        N, a.kmerSize, a.maxDist, exactJaccardFn, minCommonFn, a.output, a.threads);
+    double t4 = get_sec();
+    std::cerr << "dist time: "  << t4 - t3 << " s\n";
+    std::cerr << "total time: " << t4 - t0 << " s\n";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  §4  list_allpairs<T> – generic O(N²) baseline used by algorithms that have
 //      no specialised list-mode path (MinHash, HLL, ProbMinHash, FastKMV in
 //      no-index mode).  BinDash uses its own fast path (see §9).
@@ -1084,6 +1190,8 @@ static void run_index_kssd(const Args& a, const std::vector<std::string>& files)
 
     #pragma omp parallel num_threads(a.threads)
     {
+        // Kssd sketches can hold > 65535 unique k-mers per genome, so
+        // intersection counts can exceed uint16_t.  Keep int here.
         std::vector<int> isect(N, 0);
         std::vector<int> stamp(N, 0);
         int ep = 0;
@@ -1462,6 +1570,235 @@ static void run_allpairs_bindash(const Args& a, const std::vector<std::string>& 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  §9b  HLL --index  (mirrors test_HLL.cpp's NEW inverted-index path)
+//
+//      Replaces the old LSH band-streaming approach (which was lossy due to
+//      MAX_BUCKET skips) with a SetSketch-style witness inverted index:
+//
+//      1. Each HyperLogLog tracks the 64-bit hash that "won" each register
+//         (i.e., the k-mer with the longest leading-zero run that mapped to
+//         that bucket). Sharing a register-i witness ⇒ shared k-mer ∈ A∩B.
+//      2. Subsample witnesses with WITNESS_STRIDE=4 (one key per 4 registers).
+//         For bits=13 this gives 2048 keys per sketch (similar to FastKMV K).
+//      3. Sort by cardinality descending so size-ratio pruning can `break`
+//         instead of `continue`.
+//      4. Build CSR inverted index, singleton-filter keys, then verify
+//         candidates exactly with HyperLogLog::distance() (Ertl joint MLE).
+//
+//      Mode A (expectedOverlap >= 20) → inverted index + exact verify.
+//      Mode B fallback → in-memory O(N²) all-pairs over the same HLL vector
+//                        (no resketch; cheap because cores are 8KB).
+// ═══════════════════════════════════════════════════════════════════════════
+static void run_index_hll(const Args& a, const std::vector<std::string>& files_in) {
+    using namespace std;
+
+    const int N = static_cast<int>(files_in.size());
+    if (N == 0) { cerr << "ERROR: empty file list\n"; return; }
+
+    const int bits = a.hllBits;
+    const int m    = 1 << bits;
+
+    // Stride 4: 8192/4 = 2048 keys per sketch — same order as FastKMV K=1024
+    // and SetSketch witnessesPerSketch=2048. Lower stride = more keys = better
+    // recall but more index work; 4 is the SetSketch default proven to work.
+    static const int WITNESS_STRIDE = 4;
+    const int witnessesPerSketch = m / WITNESS_STRIDE;
+    cerr << "registers=" << m << "  witnessStride=" << WITNESS_STRIDE
+         << "  witnessKeys=" << witnessesPerSketch
+         << "  hllBits=" << bits << "\n";
+
+    // ── Phase 1: Sketch construction (with witness tracking) ────────────────
+    vector<unique_ptr<Sketch::HyperLogLog>> vhll(N);
+    vector<double>           sizes(N, 0.0);
+    vector<vector<uint64_t>> skKeys(N);
+    vector<string>           fileList = files_in;
+
+    double t0 = get_sec();
+    #pragma omp parallel for num_threads(a.threads) schedule(dynamic)
+    for (int t = 0; t < N; ++t) {
+        auto sk = std::make_unique<Sketch::HyperLogLog>(bits, /*track_witnesses=*/true);
+        gzFile fp = gzopen(fileList[t].c_str(), "r");
+        if (!fp) { vhll[t] = std::move(sk); continue; }
+        kseq_t* ks = kseq_init(fp);
+        while (kseq_read(ks) >= 0) sk->update(ks->seq.s);
+        kseq_destroy(ks);
+        gzclose(fp);
+
+        sizes[t] = sk->cardinality();
+        const uint64_t* wit = sk->getWitnesses().data();
+        skKeys[t].reserve(witnessesPerSketch);
+        for (int p = 0; p < m; p += WITNESS_STRIDE)
+            if (wit[p] != 0) skKeys[t].push_back(wit[p]);
+
+        vhll[t] = std::move(sk);
+    }
+    double t1 = get_sec();
+    cerr << "sketch time: " << t1 - t0 << " s\n";
+
+    // ── Sort by cardinality descending + reorder all per-genome arrays ──────
+    {
+        vector<int> order(N);
+        iota(order.begin(), order.end(), 0);
+        sort(order.begin(), order.end(),
+             [&](int aa, int bb) { return sizes[aa] > sizes[bb]; });
+
+        vector<unique_ptr<Sketch::HyperLogLog>> sH(N);
+        vector<string>                          sF(N);
+        vector<double>                          sS(N, 0.0);
+        vector<vector<uint64_t>>                sK(N);
+        for (int ni = 0; ni < N; ++ni) {
+            const int oi = order[ni];
+            sH[ni] = std::move(vhll[oi]);
+            sF[ni] = fileList[oi];
+            sS[ni] = sizes[oi];
+            sK[ni] = std::move(skKeys[oi]);
+        }
+        vhll.swap(sH);
+        fileList.swap(sF);
+        sizes.swap(sS);
+        skKeys.swap(sK);
+    }
+
+    // ── Decide mode: inverted index needs ≥20 expected witness overlap ──────
+    // Witness sharing rate ≈ Jaccard × witnessesPerSketch (same model as
+    // SetSketch). expectedOverlap >= 20 ⇒ P(missed valid pair) < e^(-20).
+    const double p_exp  = std::exp(-static_cast<double>(a.kmerSize) * a.maxDist);
+    const double minJac = p_exp / (2.0 - p_exp);
+    const double expectedOverlap = static_cast<double>(witnessesPerSketch) * minJac;
+    const bool   useInvIdx = (expectedOverlap >= 20.0);
+    cerr << "minJac=" << minJac << "  expectedWitnessOverlap=" << expectedOverlap
+         << "  mashD<" << a.maxDist << "  k=" << a.kmerSize << "\n";
+
+    double t5 = get_sec();
+
+    if (useInvIdx) {
+        // ───────────── MODE A: inverted index (witness hashes) + exact ─────
+        cerr << "mode: INVERTED INDEX (HLL witness hashes)\n";
+
+        const int actualThreads = min(a.threads, N);
+        vector<phmap::flat_hash_map<uint64_t, vector<uint32_t>>> threadIdx(actualThreads);
+
+        double ti0 = get_sec();
+        #pragma omp parallel num_threads(a.threads)
+        {
+            int tid = omp_get_thread_num();
+            if (tid < actualThreads) {
+                auto& localIdx = threadIdx[tid];
+                #pragma omp for schedule(static)
+                for (int t = 0; t < N; ++t)
+                    for (uint64_t key : skKeys[t])
+                        localIdx[key].push_back(static_cast<uint32_t>(t));
+            }
+        }
+        double ti1 = get_sec();
+        cerr << "local index: " << ti1 - ti0 << " s\n";
+
+        auto csrIdx = Sketch::buildCSRIndex<uint64_t>(threadIdx, a.threads);
+        double ti2 = get_sec();
+        cerr << "CSR build: " << ti2 - ti1 << " s\n";
+
+        // Singleton-filter skKeys: keys present in only one sketch can't
+        // produce candidates. Same optimization as run_index_setsketch.
+        {
+            size_t kbefore = 0, kafter = 0;
+            #pragma omp parallel for num_threads(a.threads) schedule(dynamic, 64) \
+                                     reduction(+:kbefore,kafter)
+            for (int t = 0; t < N; ++t) {
+                kbefore += skKeys[t].size();
+                vector<uint64_t> kept;
+                kept.reserve(skKeys[t].size() / 5);
+                for (uint64_t key : skKeys[t])
+                    if (csrIdx.postIdx.count(key))
+                        kept.push_back(key);
+                kafter += kept.size();
+                skKeys[t] = std::move(kept);
+            }
+            cerr << "skKeys singleton-filtered: " << kbefore << " -> " << kafter
+                 << " (" << (kbefore > 0 ? 100.0 * kafter / kbefore : 0.0)
+                 << "% retained, freed ~"
+                 << (kbefore - kafter) * 8 / (1 << 20) << " MB)\n";
+        }
+
+        // 8-sigma minCommon (same as SetSketch). Witness sharing follows
+        // approximate binomial(witnessesPerSketch, J) with mean expectedOverlap.
+        const double sd = std::sqrt(std::max(0.0, expectedOverlap * (1.0 - minJac)));
+        const int minCommon = max(1, static_cast<int>(std::floor(expectedOverlap - 8.0 * sd)));
+        cerr << "minCommon=" << minCommon << " (expected=" << expectedOverlap
+             << ", 8sigma=" << 8.0 * sd << ")\n";
+
+        // Exact verification: HLL::distance() runs Ertl joint MLE on the two
+        // register arrays. Size-ratio prune up front saves the MLE call.
+        auto exactJaccardFn = [&](int i, int j) -> double {
+            const double si = sizes[i], sj = sizes[j];
+            if (si > 0.0 && sj / si < minJac) return -1.0;
+            const double d = vhll[i]->distance(*vhll[j]);
+            return 1.0 - d;  // distance() returns 1 - jaccard
+        };
+        auto minCommonFn = [minCommon](int) { return minCommon; };
+
+        Sketch::computeDistancesExact<uint64_t>(
+            csrIdx, skKeys, fileList,
+            N, a.kmerSize, a.maxDist, exactJaccardFn, minCommonFn,
+            a.output, a.threads);
+    } else {
+        // ───────────── MODE B: all-pairs O(N²) over already-built HLLs ─────
+        // No re-sketch; reuse vhll. Cheap because HLL distance is one O(m)
+        // SIMD pass over two 8KB register arrays. Sorted-by-cardinality
+        // already, so size-ratio prune is a `break` not `continue`.
+        cerr << "mode: ALL-PAIRS (sorted, size-ratio prune)\n";
+        { vector<vector<uint64_t>>().swap(skKeys); }   // free witnesses
+
+        // Resolve output path (handle directory)
+        string finalPath = a.output;
+        {
+            struct stat st;
+            if (stat(finalPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                if (finalPath.back() != '/') finalPath += '/';
+                finalPath += "rabbitsketch.dist";
+            }
+        }
+        cerr << "output: " << finalPath << "\n";
+
+        vector<string> bufs(a.threads);
+        int progress = N / 20;
+        if (progress < 1) progress = 1;
+
+        #pragma omp parallel for num_threads(a.threads) schedule(dynamic, 1)
+        for (int i = 0; i < N; ++i) {
+            const int tid = omp_get_thread_num();
+            string& buf = bufs[tid];
+            const double si = sizes[i];
+            for (int j = i + 1; j < N; ++j) {
+                const double sj = sizes[j];
+                if (si > 0.0 && sj / si < minJac) break;  // sorted descending
+
+                const double dist = vhll[i]->distance(*vhll[j]);
+                if (dist < a.maxDist) {
+                    char line[1024];
+                    int len = snprintf(line, sizeof(line), "%s\t%s\t%.6f\n",
+                        fileList[i].c_str(), fileList[j].c_str(), dist);
+                    buf.append(line, static_cast<size_t>(len));
+                }
+            }
+            if (i % progress == 0) {
+                #pragma omp critical
+                cerr << "  dist " << i << " / " << N << "\n";
+            }
+        }
+
+        FILE* fp = fopen(finalPath.c_str(), "w");
+        if (!fp) err(errno, "cannot open output: %s", finalPath.c_str());
+        setvbuf(fp, nullptr, _IOFBF, 1 << 22);
+        for (auto& b : bufs) fwrite(b.data(), 1, b.size(), fp);
+        fclose(fp);
+    }
+
+    double t6 = get_sec();
+    cerr << "dist time: "  << t6 - t5 << " s\n";
+    cerr << "total time: " << t6 - t0 << " s\n";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  §10  CLI dispatch
 // ═══════════════════════════════════════════════════════════════════════════
 int run_cli(const Args& a) {
@@ -1485,10 +1822,12 @@ int run_cli(const Args& a) {
 
     if (a.useIndex) {
         switch (a.algo) {
+            case Algo::MINHASH:     run_index_minhash(a, files);    return 0;
             case Algo::FASTKMV:     run_index_fastkmv(a, files);    return 0;
             case Algo::PROBMINHASH: run_index_probmh(a, files);     return 0;
             case Algo::KSSD:        run_index_kssd(a, files);       return 0;  // never returns (uses _Exit)
             case Algo::SETSKETCH:   run_index_setsketch(a, files);  return 0;
+            case Algo::HLL:         run_index_hll(a, files);        return 0;
             default:
                 std::cerr << "WARNING: --index not supported for this algorithm; "
                              "falling back to all-pairs\n";

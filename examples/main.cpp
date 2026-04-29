@@ -71,10 +71,10 @@ static void print_usage(const char* prog) {
 "  -i fileA fileB         pairwise distance between two FASTA/FASTQ files\n"
 "  -i list.txt -l         all-pairs over the file list\n"
 "  --index                use inverted-index pipeline (list mode only;\n"
-"                         supported for fastkmv/probminhash/kssd/setsketch)\n\n"
+"                         supported for minhash/fastkmv/probminhash/kssd/setsketch/hll)\n\n"
 "Common options:\n"
 "  -o <path>              output file (default: rabbitsketch.dist)\n"
-"  -k <int>               k-mer size (default 21; setsketch uses 32)\n"
+"  -k <int>               k-mer size (default 21; hll & setsketch use 32)\n"
 "  -t <int>               threads (default: omp_get_max_threads())\n"
 "  -d <float>             max Mash distance filter (default 0.05; use 1.0 for no filter)\n"
 "  --seed <u64>           hash seed (default 42)\n\n"
@@ -111,7 +111,7 @@ static int parse_args(int argc, char* argv[], Args& a) {
         std::string s = argv[i];
         if      (s == "--minhash")      setAlgo(Algo::MINHASH);
         else if (s == "--kssd")         setAlgo(Algo::KSSD);
-        else if (s == "--hll")          setAlgo(Algo::HLL);
+        else if (s == "--hll")        { setAlgo(Algo::HLL);       a.kmerSize = 32; } // HLL update() hardcodes KMERLEN=32
         else if (s == "--probminhash")  setAlgo(Algo::PROBMINHASH);
         else if (s == "--bindash")      setAlgo(Algo::BINDASH);
         else if (s == "--setsketch")  { setAlgo(Algo::SETSKETCH); a.kmerSize = 32; }

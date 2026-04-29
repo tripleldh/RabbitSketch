@@ -231,12 +231,29 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 		}
 		#endif
 
-		for (int j = 0; j < lanes; j++) {
-			if (!lane_valid[j]) continue;
-			core_[indexv[j]] = std::max(core_[indexv[j]], (uint8_t)lztv[j]);
+		// Witness-tracking branch hoisted out of the lane loop so the non-tracking
+		// path keeps its original `std::max` (no compare-then-store penalty).
+		if (track_witnesses_) {
+			for (int j = 0; j < lanes; j++) {
+				if (!lane_valid[j]) continue;
+				const uint32_t idx = indexv[j];
+				const uint8_t  lzt = (uint8_t)lztv[j];
+				if (lzt > core_[idx]) {
+					core_[idx] = lzt;
+					witnesses_[idx] = hashvalv[j];
+				}
 #if LZ_COUNTER
-			++clz_counts_[clz(((hashvalv[j] << 1) | 1) << (np_ - 1)) + 1];
+				++clz_counts_[clz(((hashvalv[j] << 1) | 1) << (np_ - 1)) + 1];
 #endif
+			}
+		} else {
+			for (int j = 0; j < lanes; j++) {
+				if (!lane_valid[j]) continue;
+				core_[indexv[j]] = std::max(core_[indexv[j]], (uint8_t)lztv[j]);
+#if LZ_COUNTER
+				++clz_counts_[clz(((hashvalv[j] << 1) | 1) << (np_ - 1)) + 1];
+#endif
+			}
 		}
 	}
 
@@ -248,7 +265,14 @@ void HyperLogLog::compTwoSketch(const std::vector<uint8_t> &sketch1, const std::
 			uint64_t hashval = mc::murmur3_fmix(res, 42);
 			const uint32_t index = hashval >> qq;
 			const uint8_t lzt = clz(((hashval << 1) | 1) << (np_ - 1)) + 1;
-			core_[index] = std::max(core_[index], lzt);
+			if (track_witnesses_) {
+				if (lzt > core_[index]) {
+					core_[index] = lzt;
+					witnesses_[index] = hashval;
+				}
+			} else {
+				core_[index] = std::max(core_[index], lzt);
+			}
 #if LZ_COUNTER
 			++clz_counts_[clz(((hashval << 1) | 1) << (np_ - 1)) + 1];
 #endif
@@ -348,7 +372,18 @@ inline void HyperLogLog::addh(const std::string &element) {
 inline void HyperLogLog::add(uint64_t hashval) {
 	const uint32_t index(hashval >> q());
 	const uint8_t lzt(clz(((hashval << 1)|1) << (np_ - 1)) + 1);
-	core_[index] = std::max(core_[index], lzt);
+	if (track_witnesses_) {
+		// Strict-greater so witness records the first hash that achieved
+		// the current max (deterministic given hash function & input order).
+		// Two sketches that share a register-i witness ⇒ both saw the same
+		// k-mer that was the leading-zero champion of bucket i ⇒ k-mer ∈ A∩B.
+		if (lzt > core_[index]) {
+			core_[index] = lzt;
+			witnesses_[index] = hashval;
+		}
+	} else {
+		core_[index] = std::max(core_[index], lzt);
+	}
 #if LZ_COUNTER
 	++clz_counts_[clz(((hashval << 1)|1) << (np_ - 1)) + 1];
 #endif
