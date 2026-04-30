@@ -50,7 +50,7 @@ EXTRA_LDFLAGS=
 endif
 
 rabbitsketch: $(RABBIT_CLI_SRCS) sub_command.h $(RABBIT_SRCS) ../src/InvertedIndex.h
-	$(CXX) $(CXXFLAGS) $(RABBIT_CLI_SRCS) $(RABBIT_SRCS) -o rabbitsketch $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
+	$(CXX) $(CXXFLAGS) $(RABBIT_CLI_SRCS) $(RABBIT_SRCS) -o rabbitsketch $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -ldeflate -lz -lrabbitsketch_static
 
 exe_test_ProbMinHash: test_ProbMinHash.cpp ../src/probmh.cpp ../src/InvertedIndex.h
 	$(CXX) $(CXXFLAGS) test_ProbMinHash.cpp ../src/probmh.cpp -o exe_test_ProbMinHash $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
@@ -63,6 +63,9 @@ exe_test_FastKMV: test_FastKMV.cpp ../src/fastkmv.cpp ../src/InvertedIndex.h
 
 exe_test_TopLProbMinHash: test_TopLProbMinHash.cpp ../src/probmh.cpp
 	$(CXX) $(CXXFLAGS) test_TopLProbMinHash.cpp ../src/probmh.cpp -o exe_test_TopLProbMinHash $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
+
+exe_eval_reads: eval_reads.cpp ../src/probmh.cpp ../src/fastkmv.cpp ../src/BinDash.cpp ../src/SetSketch.cpp
+	$(CXX) $(CXXFLAGS) eval_reads.cpp ../src/probmh.cpp ../src/fastkmv.cpp ../src/BinDash.cpp ../src/SetSketch.cpp -o exe_eval_reads $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static
 
 exe_eval_sketch_acc: eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp ../src/BinDash.cpp
 	$(CXX) $(CXXFLAGS) eval_sketch_accuracy.cpp ../src/probmh.cpp ../src/probmh_op.cpp ../src/fastkmv.cpp ../src/BinDash.cpp -o exe_eval_sketch_acc $(RABBIT_LIBDIRS) $(EXTRA_LDFLAGS) -lz -lrabbitsketch_static

@@ -12,7 +12,7 @@
  *   --minhash      classical bottom-k MinHash
  *   --kssd         dimensionality-reduced k-mer sketch
  *   --hll          HyperLogLog cardinality / Jaccard sketch
- *   --probminhash  weighted ProbMinHash4 (entropy-weighted update)
+ *   --probminhash  frequency-weighted ProbMinHash4 (PMH-norm, J_P estimator)
  *   --bindash      b-bit one-permutation hashing
  *   --setsketch    register-based set sketch
  *   --fastkmv      FastKMV bottom-k sketch
@@ -37,7 +37,6 @@
  *   --hll           -b   <int>     log2(register count)            (default 13)
  *   --probminhash   -m   <int>     registers                       (default 1024)
  *                   -L   <int>     max-L truncation (0 = full)     (default 0)
- *                   --no-entropy   uniform-weighted update
  *   --bindash       --bbits <int>  bits per bin                    (default 16)
  *                   --sketch64 <int> 64-bin groups                 (default 16; NBINS = sketch64 * 64)
  *   --setsketch     -b   <int>     log2(register count)            (default 13)
@@ -82,7 +81,8 @@ static void print_usage(const char* prog) {
 "  --minhash      -s <int>             sketch size      (1000)\n"
 "  --kssd         --drlevel <int>      (3)\n"
 "  --hll          -b <int>             log2(registers)  (13)\n"
-"  --probminhash  -m <int> -L <int> [--no-entropy] (1024, 0; entropy on by default)\n"
+"  --probminhash  -m <int> -L <int>   sketch size / max-L (1024, 0)\n"
+"                  freq-weighted PMH-norm (J_P estimator, coverage-robust)\n"
 "  --bindash      --bbits <int> --sketch64 <int>  (16, 16)\n"
 "  --setsketch    -b <int> -a <float> -B <float>  (13, 20.0, 2.0)\n"
 "  --fastkmv      -K <int>             sketch size      (1024)\n";
@@ -139,8 +139,6 @@ static int parse_args(int argc, char* argv[], Args& a) {
         else if (s == "-b")             { need(i, "-b"); a.hllBits = a.ssBits = std::stoi(argv[++i]); }
         else if (s == "-m")             { need(i, "-m"); a.pmhM = static_cast<uint32_t>(std::stoul(argv[++i])); }
         else if (s == "-L")             { need(i, "-L"); a.pmhMaxL = static_cast<uint32_t>(std::stoul(argv[++i])); }
-        else if (s == "--entropy")      a.pmhEntropy = true;
-        else if (s == "--no-entropy")   a.pmhEntropy = false;
         else if (s == "--bbits")        { need(i, "--bbits");    a.bdBbits    = static_cast<uint32_t>(std::stoul(argv[++i])); }
         else if (s == "--sketch64")     { need(i, "--sketch64"); a.bdSketch64 = static_cast<uint32_t>(std::stoul(argv[++i])); }
         else if (s == "-a")             { need(i, "-a"); a.ssA    = std::stod(argv[++i]); }

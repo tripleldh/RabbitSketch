@@ -487,7 +487,8 @@ ProbMinHash4::ProbMinHash4(uint32_t m, int kmer_size, uint64_t seed,
       total_weight_(0.0),
       ted_params_(new TedParam[m - 1]),
       tracker_(m),
-      perm_(m)
+      perm_(m),
+      winners_(new uint64_t[m]())   // zero-initialised; 0 = "not yet set"
 {
     assert(m > 1);
     assert(kmer_size >= 1 && kmer_size <= 32);
@@ -536,6 +537,8 @@ ProbMinHash4::ProbMinHash4(const ProbMinHash4& o)
     std::copy(o.tracker_.leaves(), o.tracker_.leaves() + m_,
               tracker_.leaves());
     tracker_.build_from_leaves();
+    winners_.reset(new uint64_t[m_]);
+    std::copy(o.winners_.get(), o.winners_.get() + m_, winners_.get());
 }
 
 ProbMinHash4& ProbMinHash4::operator=(ProbMinHash4 other) {
@@ -548,6 +551,7 @@ ProbMinHash4& ProbMinHash4::operator=(ProbMinHash4 other) {
     std::swap(firstBoundaryInv_, other.firstBoundaryInv_);
     Sketch::swap(tracker_,       other.tracker_);
     Sketch::swap(perm_,          other.perm_);
+    std::swap(winners_,          other.winners_);
     return *this;
 }
 
@@ -595,7 +599,7 @@ void ProbMinHash4::addHashFromRng(uint64_t rng, double weight) {
     uint32_t updates = 0;
     uint32_t i = 1;
     while (hv < cur_max) {
-        tracker_.update(perm_.next(rng), hv);
+        { uint32_t reg = perm_.next(rng); if (tracker_.update(reg, hv)) winners_[reg] = rng; }
         cur_max = tracker_.getMax();                                // refresh
         if (++updates >= L) break;                                  // ← Top-L
         if (!(wInv * ted[i - 1].boundary < cur_max)) break;
@@ -606,8 +610,10 @@ void ProbMinHash4::addHashFromRng(uint64_t rng, double weight) {
         } else {
             hv = wInv * (ted[m - 2].boundary +
                          firstBoundaryInv_ * zig_exponential(rng));
-            if (updates < L && hv < cur_max)                        // ← Top-L
-                tracker_.update(perm_.next(rng), hv);
+            if (updates < L && hv < cur_max) {                      // ← Top-L
+                uint32_t reg = perm_.next(rng);
+                if (tracker_.update(reg, hv)) winners_[reg] = rng;
+            }
             break;
         }
         ++i;
@@ -1290,6 +1296,20 @@ double ProbMinHash4::jaccard(const ProbMinHash4& other) const {
     return static_cast<double>(count) / static_cast<double>(m_);
 }
 
+double ProbMinHash4::jaccard_weighted(const ProbMinHash4& other) const {
+    assert(m_ == other.m_);
+    const uint64_t* __restrict__ a = winners_.get();
+    const uint64_t* __restrict__ b = other.winners_.get();
+    int count = 0;
+    // Count registers where the SAME element (same rng) won in both sketches.
+    // This is correct even when the element has different weights in A vs B:
+    // same h → same rng (murmur3_fmix(h, seed_)) → same winners_ entry.
+    // P(collision in register k) = WJ = Σmin(wA,wB)/Σmax(wA,wB).
+    for (uint32_t k = 0; k < m_; ++k)
+        count += (a[k] != 0 && a[k] == b[k]) ? 1 : 0;
+    return static_cast<double>(count) / static_cast<double>(m_);
+}
+
 double ProbMinHash4::distance(const ProbMinHash4& other) const {
     const double j = jaccard(other);
     if (j <= 0.0) return std::numeric_limits<double>::infinity();
@@ -1386,6 +1406,20 @@ void ProbMinHash4::getInvertedIndexKeys(std::vector<uint64_t>& keys) const {
         uint64_t raw;
         std::memcpy(&raw, &regs[i], sizeof(double));
         keys.push_back(raw ^ (uint64_t(i) * 0x9E3779B97F4A7C15ULL));
+    }
+}
+
+void ProbMinHash4::getWinnerIndexKeys(std::vector<uint64_t>& keys) const {
+    // winners_[k] holds the element-identity (murmur3_fmix of hash + seed)
+    // for the element that won register k; 0 means unset.
+    // Encoding: XOR with a register-specific constant so that the same
+    // element winning different registers produces different keys.
+    keys.clear();
+    keys.reserve(m_);
+    if (!winners_) return;
+    for (uint32_t k = 0; k < m_; k++) {
+        if (winners_[k] == 0) continue;
+        keys.push_back(winners_[k] ^ (uint64_t(k) * 0x9E3779B97F4A7C15ULL));
     }
 }
 

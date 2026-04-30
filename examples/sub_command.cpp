@@ -75,6 +75,223 @@ static std::vector<std::string> load_file_list(const std::string& path) {
     return out;
 }
 
+// ── Frequency-weighted k-mer counting for PMH-norm ────────────────────────
+// Estimates J_P = Σ min(p_A,p_B) / Σ max(p_A,p_B)  (coverage-robust metric).
+//
+// Key design choices vs naïve phmap approach:
+//
+//  1. Vector+sort instead of hash map for counting:
+//     phmap::flat_hash_map grows by 2x with mmap(), causing hundreds of millions
+//     of minor page faults per run (observed: 693M faults, 5179 s system time
+//     for 208K files).  A std::vector<uint64_t> + std::sort uses one contiguous
+//     allocation, making page faults rare and avoiding kernel overhead entirely.
+//     Result is identical (addHash order does not affect the PMH sketch).
+//
+//  2. libdeflate for .gz decompression (2-3× faster than zlib):
+//     Reads the full compressed file into a raw buffer, decompresses in one
+//     shot, then parses FASTQ in-memory without zlib overhead.  Falls back
+//     to kseq (zlib) for non-gz files or if decompression fails.
+//
+//  3. 1/PMH_SDIV hash-sampling keeps per-thread memory constant (~10 MB):
+//     E[J_P_sampled] = J_P  (numerator and denominator both scale by 1/SDIV).
+// ──────────────────────────────────────────────────────────────────────────
+
+#include <libdeflate.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+static constexpr uint64_t PMH_SDIV      = 8;
+static constexpr uint64_t PMH_STHRESH   = UINT64_MAX / PMH_SDIV;
+static constexpr uint64_t PMH_SMIX      = 0x9E3779B97F4A7C15ULL;
+
+static const uint8_t PMH_BASE2[256] = {
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,   0,0xFF,   1,0xFF,0xFF,0xFF,   2,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,   3,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,   0,0xFF,   1,0xFF,0xFF,0xFF,   2,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,   3,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+};
+
+// Process k-mers from a sequence buffer, accumulating sampled canonical k-mers
+// into `sampled` and counting all k-mer instances in `total`.
+static inline void pmh_kmers(const char* seq, int len, int k,
+                              const uint64_t mask, const uint64_t hi_shift,
+                              std::vector<uint64_t>& sampled, uint64_t& total) {
+    uint64_t fwd = 0, rev = 0; int valid = 0;
+    for (int i = 0; i < len; ++i) {
+        const uint8_t b = PMH_BASE2[(uint8_t)seq[i]];
+        if (b == 0xFF) { valid = 0; fwd = 0; rev = 0; continue; }
+        fwd = ((fwd << 2) | b) & mask;
+        rev = (rev >> 2) | ((uint64_t)(3 ^ b) << hi_shift);
+        if (++valid >= k) {
+            const uint64_t can = (fwd <= rev) ? fwd : rev;
+            ++total;
+            if ((can * PMH_SMIX) <= PMH_STHRESH)
+                sampled.push_back(can);
+        }
+    }
+}
+
+// Fast in-memory FASTQ parser: only extracts sequence lines.
+// Assumes single-line sequences per record (standard short-read FASTQ).
+static void parse_fastq_mem(const char* buf, size_t len, int k,
+                             const uint64_t mask, const uint64_t hi_shift,
+                             std::vector<uint64_t>& sampled, uint64_t& total) {
+    const char* p   = buf;
+    const char* end = buf + len;
+    while (p < end) {
+        if (*p != '@') { ++p; continue; }
+        // skip header line
+        while (p < end && *p != '\n') ++p;
+        if (p >= end) break; ++p;
+        // sequence line
+        const char* seq = p;
+        while (p < end && *p != '\n') ++p;
+        int slen = (int)(p - seq);
+        if (slen >= k) pmh_kmers(seq, slen, k, mask, hi_shift, sampled, total);
+        if (p >= end) break; ++p;
+        // '+' line
+        while (p < end && *p != '\n') ++p;
+        if (p >= end) break; ++p;
+        // quality line (skip)
+        while (p < end && *p != '\n') ++p;
+        if (p < end) ++p;
+    }
+}
+
+// Build a PMH-norm sketch using libdeflate for .gz, kseq fallback otherwise.
+// Uses vector+sort for counting (no hash map = no mmap page-fault explosion).
+static Sketch::ProbMinHash4*
+pmh_build_weighted(const std::string& path, uint32_t m, int k,
+                   uint64_t seed, uint32_t maxL) {
+    const uint64_t mask     = (1ULL << (2 * k)) - 1;
+    const uint64_t hi_shift = 2ULL * (k - 1);
+
+    // Reserve for ~1M sampled k-mers; a single 8 MB contiguous allocation.
+    std::vector<uint64_t> sampled;
+    sampled.reserve(1 << 20);
+    uint64_t total = 0;
+
+    bool used_libdeflate = false;
+
+    // ── libdeflate path for .gz files ────────────────────────────────────
+    // Only used for files < 50 MB compressed: larger files would need a
+    // 200+ MB decompression buffer per thread, which wastes memory.
+    // For large files, kseq (streaming zlib) is used instead.
+    static constexpr size_t DEFLATE_MAX_CMP = 50ULL * 1024 * 1024;
+    const bool is_gz = path.size() > 3 &&
+                       path.compare(path.size() - 3, 3, ".gz") == 0;
+    if (is_gz) {
+        int fd = open(path.c_str(), O_RDONLY);
+        if (fd >= 0) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && st.st_size > 0 &&
+                static_cast<size_t>(st.st_size) <= DEFLATE_MAX_CMP) {
+                std::vector<uint8_t> cmp(static_cast<size_t>(st.st_size));
+                size_t nread = 0;
+                while (nread < cmp.size()) {
+                    ssize_t r = read(fd, cmp.data() + nread, cmp.size() - nread);
+                    if (r <= 0) break;
+                    nread += r;
+                }
+                close(fd);
+                if (nread == cmp.size()) {
+                    // Decompress: try 4×, grow to 8× if needed.
+                    size_t out_cap = cmp.size() * 4;
+                    std::vector<char> ubuf(out_cap);
+                    auto* dc = libdeflate_alloc_decompressor();
+                    size_t actual = 0, in_used = 0;
+                    for (int attempt = 0; attempt < 4; ++attempt) {
+                        auto rc = libdeflate_gzip_decompress_ex(
+                            dc, cmp.data(), cmp.size(),
+                            ubuf.data(), out_cap, &in_used, &actual);
+                        if (rc == LIBDEFLATE_SUCCESS) { used_libdeflate = true; break; }
+                        if (rc == LIBDEFLATE_INSUFFICIENT_SPACE) {
+                            out_cap *= 2; ubuf.resize(out_cap);
+                        } else { break; }
+                    }
+                    libdeflate_free_decompressor(dc);
+                    if (used_libdeflate) {
+                        // Handle multi-member gzip (rare but possible)
+                        const char* p = ubuf.data();
+                        size_t rem    = actual;
+                        parse_fastq_mem(p, rem, k, mask, hi_shift, sampled, total);
+                        // If there are more gzip members in `cmp`, process them
+                        while (in_used < cmp.size()) {
+                            size_t out2 = out_cap;
+                            std::vector<char> ubuf2(out2);
+                            size_t act2 = 0, in2 = 0;
+                            dc = libdeflate_alloc_decompressor();
+                            for (int attempt = 0; attempt < 4; ++attempt) {
+                                auto rc = libdeflate_gzip_decompress_ex(
+                                    dc, cmp.data() + in_used, cmp.size() - in_used,
+                                    ubuf2.data(), out2, &in2, &act2);
+                                if (rc == LIBDEFLATE_SUCCESS) break;
+                                if (rc == LIBDEFLATE_INSUFFICIENT_SPACE) {
+                                    out2 *= 2; ubuf2.resize(out2);
+                                } else { act2 = 0; break; }
+                            }
+                            libdeflate_free_decompressor(dc);
+                            if (act2 == 0) break;
+                            parse_fastq_mem(ubuf2.data(), act2, k, mask, hi_shift, sampled, total);
+                            in_used += in2;
+                        }
+                    }
+                } else { close(fd); }
+            } else { close(fd); }
+        }
+    }
+
+    // ── kseq / zlib fallback ─────────────────────────────────────────────
+    if (!used_libdeflate) {
+        gzFile fp = gzopen(path.c_str(), "r");
+        if (fp) {
+            kseq_t* ks = kseq_init(fp);
+            while (kseq_read(ks) >= 0) {
+                const char* seq = ks->seq.s;
+                const int   len = (int)ks->seq.l;
+                if (len >= k)
+                    pmh_kmers(seq, len, k, mask, hi_shift, sampled, total);
+            }
+            kseq_destroy(ks);
+            gzclose(fp);
+        } else {
+            std::cerr << "WARNING: cannot open " << path << "\n";
+        }
+    }
+
+    // ── sort + run-length count → PMH sketch ─────────────────────────────
+    // Sorting gives identical results to hash-map counting (addHash is
+    // order-independent) while using contiguous memory and zero mmap resizes.
+    std::sort(sampled.begin(), sampled.end());
+
+    auto* sk = new Sketch::ProbMinHash4(m, k, seed, maxL);
+    if (total > 0 && !sampled.empty()) {
+        const double inv = 1.0 / static_cast<double>(total);
+        size_t i = 0;
+        while (i < sampled.size()) {
+            size_t j = i + 1;
+            while (j < sampled.size() && sampled[j] == sampled[i]) ++j;
+            const uint32_t cnt = static_cast<uint32_t>(j - i);
+            if (cnt > 1)
+                sk->addHash(sampled[i], static_cast<double>(cnt) * inv);
+            i = j;
+        }
+    }
+    return sk;
+}
+
 static inline double mash_distance(double jaccard, int kmer) {
     if (jaccard >= 1.0) return 0.0;
     if (jaccard <= 0.0) return 1.0;
@@ -151,13 +368,10 @@ static Sketch::Kssd* build_kssd(const std::string& path, const Args& a) {
 }
 
 static Sketch::ProbMinHash4* build_probminhash(const std::string& path, const Args& a) {
-    auto* sk = new Sketch::ProbMinHash4(a.pmhM, a.kmerSize, a.seed, a.pmhMaxL);
-    stream_seq(path, [&](char* seq, uint64_t len) {
-        if (len < static_cast<uint64_t>(a.kmerSize)) return;
-        if (a.pmhEntropy) sk->updateEntropy(seq, len);
-        else              sk->update(seq, len);
-    });
-    return sk;
+    // Frequency-weighted PMH-norm: estimates J_P = Σ min(p_A,p_B)/Σ max(p_A,p_B).
+    // J_P is robust to coverage variation (relative k-mer frequencies are
+    // preserved under uniform subsampling), unlike Binary Jaccard.
+    return pmh_build_weighted(path, a.pmhM, a.kmerSize, a.seed, a.pmhMaxL);
 }
 
 static Sketch::BinDash* build_bindash(const std::string& path, const Args& a) {
@@ -211,7 +425,7 @@ static int run_pair(const Args& a) {
     case Algo::PROBMINHASH: {
         std::unique_ptr<Sketch::ProbMinHash4> sa(build_probminhash(fA, a));
         std::unique_ptr<Sketch::ProbMinHash4> sb(build_probminhash(fB, a));
-        d = mash_distance(sa->jaccard(*sb), a.kmerSize);
+        d = mash_distance(sa->jaccard_weighted(*sb), a.kmerSize);
         break;
     }
     case Algo::BINDASH: {
@@ -476,8 +690,16 @@ static void run_index_fastkmv(const Args& a, const std::vector<std::string>& fil
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  §6  ProbMinHash --index  (mirrors test_ProbMinHash.cpp)
+//  §6  ProbMinHash --index  (frequency-weighted J_P mode)
+//
+//  Two-pass frequency-weighted pipeline:
+//    Pass-1: count k-mer occurrences (1/PMH_SDIV hash-sampling for memory).
+//    Pass-2: insert each unique k-mer once with weight = count/total_kmers.
+//  This estimates J_P = Σ min(p_A,p_B) / Σ max(p_A,p_B), which is
+//  invariant to sequencing depth — the core PMH advantage over BJ estimators.
+//  Index key = winners_[k] XOR (k × golden-ratio) via getWinnerIndexKeys().
 // ═══════════════════════════════════════════════════════════════════════════
+
 static void run_index_probmh(const Args& a, const std::vector<std::string>& files) {
     const int N = static_cast<int>(files.size());
     const int mSize = static_cast<int>(a.pmhM);
@@ -488,6 +710,7 @@ static void run_index_probmh(const Args& a, const std::vector<std::string>& file
     std::vector<phmap::flat_hash_map<uint64_t, std::vector<uint32_t>>> threadIdx(actualThreads);
 
     double t0 = get_sec();
+
     #pragma omp parallel num_threads(a.threads)
     {
         int tid = omp_get_thread_num();
@@ -495,25 +718,15 @@ static void run_index_probmh(const Args& a, const std::vector<std::string>& file
 
         #pragma omp for schedule(dynamic)
         for (int t = 0; t < N; ++t) {
-            gzFile fp = gzopen(files[t].c_str(), "r");
-            if (!fp) continue;
-            kseq_t* ks = kseq_init(fp);
+            std::unique_ptr<Sketch::ProbMinHash4> sk(
+                pmh_build_weighted(files[t], a.pmhM, a.kmerSize, a.seed, a.pmhMaxL));
 
-            Sketch::ProbMinHash4 sk(a.pmhM, a.kmerSize, a.seed, a.pmhMaxL);
-            while (kseq_read(ks) >= 0) {
-                uint64_t L = static_cast<uint64_t>(ks->seq.l);
-                if (L < static_cast<uint64_t>(a.kmerSize)) continue;
-                if (a.pmhEntropy) sk.updateEntropy(ks->seq.s, L);
-                else              sk.update(ks->seq.s, L);
-            }
-            kseq_destroy(ks);
-            gzclose(fp);
-
-            sk.getInvertedIndexKeys(skKeys[t]);
+            sk->getWinnerIndexKeys(skKeys[t]);
             for (uint64_t key : skKeys[t])
                 localIdx[key].push_back(static_cast<uint32_t>(t));
         }
     }
+
     double t1 = get_sec();
     std::cerr << "sketch + local index: " << t1 - t0 << " s\n";
 
@@ -1864,7 +2077,7 @@ int run_cli(const Args& a) {
     case Algo::PROBMINHASH:
         list_allpairs<Sketch::ProbMinHash4>(a, files, build_probminhash,
             [kmer](Sketch::ProbMinHash4* x, Sketch::ProbMinHash4* y) {
-                return mash_distance(x->jaccard(*y), kmer);
+                return mash_distance(x->jaccard_weighted(*y), kmer);
             });
         break;
 

@@ -152,8 +152,28 @@ public:
 
     /**
      * Return the probability Jaccard similarity in [0, 1].
+     * Compares register VALUES (exact float equality).  Correct for
+     * unweighted update() / updateEntropy() where the same element
+     * always produces the same priority in any sketch.
      */
     double jaccard(const ProbMinHash4& other) const;
+
+    /**
+     * Frequency-weighted Jaccard estimator via winner-hash comparison.
+     *
+     * Uses the winners_ array (set by addHash / addHashFromRng) to compare
+     * WHICH element won each register, not the priority VALUE.  This gives
+     * a correct estimate of WJ = Σmin(wA,wB)/Σmax(wA,wB) even when the
+     * same k-mer has different counts (weights) in the two sketches.
+     *
+     * Usage:
+     *   for (auto& [h, cnt] : freq_A) pmh_A.addHash(h, cnt);
+     *   for (auto& [h, cnt] : freq_B) pmh_B.addHash(h, cnt);
+     *   double wj = pmh_A.jaccard_weighted(pmh_B);
+     *
+     * Both sketches must share the same m and seed.
+     */
+    double jaccard_weighted(const ProbMinHash4& other) const;
 
     /**
      * Return Mash distance from (probability) Jaccard:
@@ -202,8 +222,21 @@ public:
     // Key = raw_bits(register_value) XOR (reg_idx * golden_ratio_constant).
     // Infinity registers are skipped.  Jaccard = matching_registers / M.
 
-    /** Fill @p keys with one uint64_t inverted-index key per non-infinity register. */
+    /** Fill @p keys with one uint64_t inverted-index key per non-infinity register.
+     *  Suitable for UNWEIGHTED update() / updateEntropy() sketches where two
+     *  registers match iff their float priority values are identical. */
     void getInvertedIndexKeys(std::vector<uint64_t>& keys) const;
+
+    /** Fill @p keys with one uint64_t inverted-index key per occupied register,
+     *  encoding both the register index and the winner element identity.
+     *
+     *  Key = winners_[k] XOR (k * golden_ratio_constant).
+     *
+     *  Suitable for WEIGHTED addHash() sketches (PMH-norm).  Two keys match
+     *  iff the SAME element won the SAME register in both sketches — which is
+     *  exactly the condition tested by jaccard_weighted().
+     *  Jaccard = matching_keys / M. */
+    void getWinnerIndexKeys(std::vector<uint64_t>& keys) const;
 
     /** Jaccard from inverted-index common count: common / m. */
     static double jaccardFromCommon(int common, uint32_t m) {
@@ -237,11 +270,20 @@ private:
     uint32_t           max_L_;    // Route C: max updates per element (m_ = unlimited)
     double             total_weight_;  // accumulated sum of all element weights
 
-    std::unique_ptr<TedParam[]> ted_params_;     // [m-1]
-    double                      firstBoundaryInv_;
+    std::unique_ptr<TedParam[]>  ted_params_;     // [m-1]
+    double                       firstBoundaryInv_;
 
     ProbMHMaxTracker   tracker_;
     ProbMHPermStream   perm_;
+
+    // ── Frequency-weighted Jaccard support ──────────────────────────────────
+    // winners_[k] = the rng (= murmur3_fmix(element_hash, seed_)) of the
+    // element that currently holds register k.  0 means "not yet set".
+    // Two registers from different sketches match iff the SAME element won
+    // both — even when that element has a different weight in each sketch.
+    // Used by jaccard_weighted() to correctly estimate weighted Jaccard
+    // WJ = Σmin(wA,wB) / Σmax(wA,wB) via addHash(hash, count).
+    std::unique_ptr<uint64_t[]>  winners_;        // [m]; 0 = unset sentinel
 };
 
 // ── One-Permutation ProbMinHash (Route A) ──────────────────────────────────

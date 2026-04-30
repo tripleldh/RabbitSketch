@@ -51,7 +51,6 @@ struct Args {
 
     uint32_t    pmhM        = 1024;
     uint32_t    pmhMaxL     = 0;
-    bool        pmhEntropy  = true;   // matches test_ProbMinHash.cpp default
 
     uint32_t    bdBbits     = 16;
     uint32_t    bdSketch64  = 16;   // matches test_BinDash.cpp (NBINS = 16 * 64 = 1024)
